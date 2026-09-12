@@ -326,7 +326,8 @@ function Panel({ onLogout, email }) {
     return [...l].sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
   }, [movs, filtroProy]);
 
-  const sinProyectos = proyectos.length === 0;
+  const appVacia = proyectos.length === 0 && movs.length === 0 && facturas.length === 0
+    && materiales.length === 0 && trabajadores.length === 0 && prestamos.length === 0;
 
   return (
     <div style={S.page}>
@@ -363,11 +364,11 @@ function Panel({ onLogout, email }) {
       <main style={S.main}>
         {cargando ? (
           <div style={S.loading}>Cargando datos…</div>
-        ) : sinProyectos && tab !== "proyectos" ? (
+        ) : appVacia && tab === "resumen" ? (
           <div style={S.card}>
             <h2 style={S.h2}>Bienvenido</h2>
             <p style={{ color: "var(--text-secondary)", fontSize: 14 }}>
-              Aún no tienes proyectos. Crea el primero en la pestaña <b>Proyectos</b> para empezar a cargar
+              Aún no tienes datos. Crea tu primer proyecto en la pestaña <b>Proyectos</b> para empezar a cargar
               movimientos, facturas y materiales.
             </p>
             <button onClick={() => setTab("proyectos")} style={{ ...S.primaryBtn, marginTop: 8 }}>
