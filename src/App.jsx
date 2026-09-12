@@ -593,7 +593,8 @@ function CajaEmpresa({ movs, clp }) {
 
 // ---------- FACTURACIÓN ----------
 function Facturacion({ facturas, proyectos, onAdd, onEstado, onDelete }) {
-  const [f, setF] = useState({ fecha: today(), proyecto: "", folio: "", neto: "", exento: false, estado: "Emitida" });
+  const mas30 = () => { const d = new Date(); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10); };
+  const [f, setF] = useState({ fecha: today(), vencimiento: mas30(), proyecto: "", folio: "", neto: "", exento: false, estado: "Emitida" });
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
   const total = (neto, exento) => Math.round(neto * (exento ? 1 : 1 + IVA_RATE));
 
@@ -601,20 +602,45 @@ function Facturacion({ facturas, proyectos, onAdd, onEstado, onDelete }) {
     const neto = parseFloat(f.neto);
     if (!neto || neto <= 0 || !f.proyecto) return;
     const p = proyectos.find((x) => x.id === f.proyecto);
-    onAdd({ fecha: f.fecha, proyecto: f.proyecto, cliente: p?.cliente || "",
+    onAdd({ fecha: f.fecha, vencimiento: f.vencimiento || null, proyecto: f.proyecto, cliente: p?.cliente || "",
       folio: f.folio || "s/folio", neto: Math.round(neto), exento: f.exento, estado: f.estado });
-    setF({ ...f, folio: "", neto: "" });
+    setF({ ...f, folio: "", neto: "", vencimiento: mas30() });
+  };
+
+  // Días que faltan (o pasaron) para el vencimiento. Negativo = ya venció.
+  const diasPara = (venc) => {
+    if (!venc) return null;
+    const hoy = new Date(today());
+    const v = new Date(venc);
+    return Math.round((v - hoy) / (1000 * 60 * 60 * 24));
+  };
+  // Semáforo solo para facturas no pagadas.
+  const semaforo = (x) => {
+    if (x.estado === "Pagada") return null;
+    const d = diasPara(x.vencimiento);
+    if (d === null) return null;
+    if (d < 0) return "vencida";
+    if (d <= 5) return "porvencer";
+    return "aldia";
+  };
+  const SEM = {
+    vencida: { bg: "var(--bg-danger)", fg: "var(--text-danger)", txt: "Vencida" },
+    porvencer: { bg: "var(--bg-warning)", fg: "var(--text-warning)", txt: "Por vencer" },
+    aldia: { bg: "var(--bg-success)", fg: "var(--text-success)", txt: "Al día" },
   };
 
   const previewIva = f.neto && !f.exento ? Math.round(parseFloat(f.neto) * IVA_RATE) : 0;
   const previewTotal = f.neto ? total(parseFloat(f.neto), f.exento) : 0;
   const totPorCobrar = facturas.filter((x) => x.estado !== "Pagada").reduce((s, x) => s + total(x.neto, x.exento), 0);
+  const totVencido = facturas.filter((x) => semaforo(x) === "vencida").reduce((s, x) => s + total(x.neto, x.exento), 0);
+  const nVencidas = facturas.filter((x) => semaforo(x) === "vencida").length;
 
   return (
     <div>
       <div style={S.metricGrid}>
         <Metric label="Facturas emitidas" value={facturas.length} />
         <Metric label="Por cobrar" value={clp(totPorCobrar)} tone="accent" />
+        <Metric label={nVencidas > 0 ? `⚠ Vencido (${nVencidas})` : "Vencido"} value={clp(totVencido)} tone={totVencido > 0 ? "neg" : "pos"} />
         <Metric label="Cobradas" value={facturas.filter((x) => x.estado === "Pagada").length + " de " + facturas.length} />
       </div>
       <div style={S.card}>
@@ -623,6 +649,9 @@ function Facturacion({ facturas, proyectos, onAdd, onEstado, onDelete }) {
         <div style={S.formGrid}>
           <Field label="Fecha">
             <input type="date" value={f.fecha} onChange={(e) => set("fecha", e.target.value)} style={S.input} />
+          </Field>
+          <Field label="Vence el (plazo de pago)">
+            <input type="date" value={f.vencimiento} onChange={(e) => set("vencimiento", e.target.value)} style={S.input} />
           </Field>
           <Field label="Proyecto / Cliente">
             <select value={f.proyecto} onChange={(e) => set("proyecto", e.target.value)} style={S.input}>
@@ -660,12 +689,14 @@ function Facturacion({ facturas, proyectos, onAdd, onEstado, onDelete }) {
           <thead><tr>
             <th style={S.th}>Fecha</th><th style={S.th}>Folio</th><th style={S.th}>Cliente</th>
             <th style={S.thR}>Neto</th><th style={S.thR}>IVA</th><th style={S.thR}>Total</th>
-            <th style={S.thC}>Estado</th><th style={S.thC}></th>
+            <th style={S.thC}>Vence</th><th style={S.thC}>Estado</th><th style={S.thC}></th>
           </tr></thead>
           <tbody>
-            {facturas.length === 0 && <tr><td colSpan={8} style={S.empty}>Sin facturas.</td></tr>}
+            {facturas.length === 0 && <tr><td colSpan={9} style={S.empty}>Sin facturas.</td></tr>}
             {facturas.map((x) => {
               const iva = x.exento ? 0 : Math.round(x.neto * IVA_RATE);
+              const sem = semaforo(x);
+              const d = diasPara(x.vencimiento);
               return (
                 <tr key={x.id}>
                   <td style={S.td}>{x.fecha}</td>
@@ -674,6 +705,16 @@ function Facturacion({ facturas, proyectos, onAdd, onEstado, onDelete }) {
                   <td style={S.tdR}>{clp(x.neto)}</td>
                   <td style={{ ...S.tdR, color: "var(--text-muted)" }}>{x.exento ? "exento" : clp(iva)}</td>
                   <td style={{ ...S.tdR, fontWeight: 500 }}>{clp(x.neto + iva)}</td>
+                  <td style={S.tdC}>
+                    {sem ? (
+                      <span style={{ ...S.pill, background: SEM[sem].bg, color: SEM[sem].fg, marginRight: 0 }}>
+                        {sem === "vencida" ? `${SEM[sem].txt} (${Math.abs(d)}d)`
+                          : sem === "porvencer" ? `${d}d` : SEM[sem].txt}
+                      </span>
+                    ) : (
+                      <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{x.vencimiento || "—"}</span>
+                    )}
+                  </td>
                   <td style={S.tdC}>
                     <select value={x.estado} onChange={(e) => onEstado(x.id, e.target.value)}
                       style={{ ...S.pillSelect, background: ESTADO_COLOR[x.estado].bg, color: ESTADO_COLOR[x.estado].fg }}>
