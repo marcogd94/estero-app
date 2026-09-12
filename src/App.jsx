@@ -156,6 +156,16 @@ function Panel({ onLogout, email }) {
     if (!error && data) setProyectos((p) => [...p, ...data]);
     return error;
   };
+  const updateProyecto = async (id, cambios) => {
+    const { error } = await supabase.from("proyectos").update(cambios).eq("id", id);
+    if (!error) setProyectos((p) => p.map((x) => x.id === id ? { ...x, ...cambios } : x));
+    return error;
+  };
+  const delProyecto = async (id) => {
+    const { error } = await supabase.from("proyectos").delete().eq("id", id);
+    if (!error) setProyectos((p) => p.filter((x) => x.id !== id));
+    return error;
+  };
 
   // ---- CRUD movimientos ----
   const addMov = async (mov) => {
@@ -397,7 +407,8 @@ function Panel({ onLogout, email }) {
                 onAddAbono={addAbono} onDelAbono={delAbono} />
             )}
             {tab === "proyectos" && (
-              <Proyectos resumen={resumenProyectos} onAdd={addProyecto} />
+              <Proyectos resumen={resumenProyectos} onAdd={addProyecto}
+                onUpdate={updateProyecto} onDelete={delProyecto} />
             )}
           </>
         )}
@@ -1040,9 +1051,11 @@ function Materiales({ materiales, proyectos, filtroProy, setFiltroProy, onAdd, o
 }
 
 // ---------- PROYECTOS ----------
-function Proyectos({ resumen, onAdd }) {
+function Proyectos({ resumen, onAdd, onUpdate, onDelete }) {
   const [f, setF] = useState({ id: "", cliente: "", nombre: "", presupuesto: "" });
   const [error, setError] = useState("");
+  const [editId, setEditId] = useState(null);
+  const [ed, setEd] = useState({ cliente: "", nombre: "", presupuesto: "", estado: "Activo" });
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
 
   const submit = async () => {
@@ -1054,6 +1067,18 @@ function Proyectos({ resumen, onAdd }) {
     });
     if (err) { setError(err.code === "23505" ? "Ya existe un proyecto con ese código." : "No se pudo guardar."); return; }
     setF({ id: "", cliente: "", nombre: "", presupuesto: "" });
+  };
+
+  const empezarEdicion = (p) => {
+    setEditId(p.id);
+    setEd({ cliente: p.cliente, nombre: p.nombre || "", presupuesto: String(p.presupuesto || 0), estado: p.estado || "Activo" });
+  };
+  const guardarEdicion = async (id) => {
+    await onUpdate(id, {
+      cliente: ed.cliente.trim(), nombre: ed.nombre.trim() || ed.cliente.trim(),
+      presupuesto: parseInt(ed.presupuesto, 10) || 0, estado: ed.estado,
+    });
+    setEditId(null);
   };
 
   return (
@@ -1088,11 +1113,46 @@ function Proyectos({ resumen, onAdd }) {
         )}
         {resumen.map((p) => {
           const avance = p.presupuesto > 0 ? Math.min(100, Math.round((p.ingresos / p.presupuesto) * 100)) : 0;
+          const editando = editId === p.id;
+          const terminado = p.estado === "Terminado";
+
+          if (editando) {
+            return (
+              <div key={p.id} style={{ ...S.projCard, border: "1px solid #1D9E75" }}>
+                <div style={S.projId}>{p.id}</div>
+                <div style={{ marginTop: 10 }}>
+                  <div style={S.fieldLabel}>Cliente</div>
+                  <input value={ed.cliente} onChange={(e) => setEd({ ...ed, cliente: e.target.value })} style={S.input} />
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <div style={S.fieldLabel}>Nombre</div>
+                  <input value={ed.nombre} onChange={(e) => setEd({ ...ed, nombre: e.target.value })} style={S.input} />
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <div style={S.fieldLabel}>Presupuesto neto</div>
+                  <input type="number" value={ed.presupuesto} onChange={(e) => setEd({ ...ed, presupuesto: e.target.value })} style={S.input} />
+                </div>
+                <div style={{ marginTop: 8 }}>
+                  <div style={S.fieldLabel}>Estado</div>
+                  <select value={ed.estado} onChange={(e) => setEd({ ...ed, estado: e.target.value })} style={S.input}>
+                    <option>Activo</option><option>Terminado</option>
+                  </select>
+                </div>
+                <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                  <button onClick={() => guardarEdicion(p.id)} style={{ ...S.primaryBtn, flex: 1 }}>Guardar</button>
+                  <button onClick={() => setEditId(null)} style={S.logoutBtn}>Cancelar</button>
+                </div>
+              </div>
+            );
+          }
+
           return (
-            <div key={p.id} style={S.projCard}>
+            <div key={p.id} style={{ ...S.projCard, opacity: terminado ? 0.7 : 1 }}>
               <div style={S.projHead}>
                 <div><div style={S.projId}>{p.id}</div><div style={S.projCli}>{p.cliente}</div></div>
-                <span style={{ ...S.pill, background: "var(--bg-success)", color: "var(--text-success)" }}>{p.estado}</span>
+                <span style={{ ...S.pill, marginRight: 0,
+                  background: terminado ? "var(--surface-1)" : "var(--bg-success)",
+                  color: terminado ? "var(--text-muted)" : "var(--text-success)" }}>{p.estado}</span>
               </div>
               <div style={S.projRow}><span>Presupuesto</span><b>{clp(p.presupuesto)}</b></div>
               <div style={S.projRow}><span>Facturado</span><b>{clp(p.ingresos)}</b></div>
@@ -1108,6 +1168,11 @@ function Proyectos({ resumen, onAdd }) {
                   <div style={S.barLabel}>{avance}% facturado del presupuesto</div>
                 </div>
               )}
+              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                <button onClick={() => empezarEdicion(p)} style={{ ...S.tinyBtn, background: "var(--surface-1)", color: "var(--text-secondary)", flex: 1 }}>Editar</button>
+                <button onClick={() => { if (confirm(`¿Eliminar el proyecto ${p.id}? Esto no borra sus movimientos, pero quedarán sin proyecto.`)) onDelete(p.id); }}
+                  style={{ ...S.tinyBtn, background: "var(--bg-danger)", color: "var(--text-danger)" }}>Eliminar</button>
+              </div>
             </div>
           );
         })}
