@@ -111,12 +111,14 @@ function Panel({ onLogout, email }) {
   const [dias, setDias] = useState([]);
   const [anticipos, setAnticipos] = useState([]);
   const [liqItems, setLiqItems] = useState([]);
+  const [prestamos, setPrestamos] = useState([]);
+  const [abonos, setAbonos] = useState([]);
   const [filtroProy, setFiltroProy] = useState("TODOS");
   const [cargando, setCargando] = useState(true);
 
   const cargarTodo = async () => {
     setCargando(true);
-    const [p, m, f, mat, tr, di, an, li] = await Promise.all([
+    const [p, m, f, mat, tr, di, an, li, pr, ab] = await Promise.all([
       supabase.from("proyectos").select("*").order("id"),
       supabase.from("movimientos").select("*").order("fecha", { ascending: false }),
       supabase.from("facturas").select("*").order("fecha", { ascending: false }),
@@ -125,6 +127,8 @@ function Panel({ onLogout, email }) {
       supabase.from("dias_trabajados").select("*"),
       supabase.from("anticipos").select("*").order("fecha", { ascending: false }),
       supabase.from("liquidacion_items").select("*"),
+      supabase.from("prestamos").select("*").order("fecha", { ascending: false }),
+      supabase.from("abonos_prestamo").select("*").order("fecha", { ascending: false }),
     ]);
     setProyectos(p.data || []);
     setMovs(m.data || []);
@@ -134,6 +138,8 @@ function Panel({ onLogout, email }) {
     setDias(di.data || []);
     setAnticipos(an.data || []);
     setLiqItems(li.data || []);
+    setPrestamos(pr.data || []);
+    setAbonos(ab.data || []);
     setCargando(false);
   };
 
@@ -241,6 +247,27 @@ function Panel({ onLogout, email }) {
     const { error } = await supabase.from("liquidacion_items").delete().eq("id", id);
     if (!error) setLiqItems((p) => p.filter((x) => x.id !== id));
   };
+  // ---- CRUD préstamos ----
+  const addPrestamo = async (pr) => {
+    const { data, error } = await supabase.from("prestamos").insert(pr).select();
+    if (!error && data) setPrestamos((p) => [...data, ...p]);
+    return error;
+  };
+  const delPrestamo = async (id) => {
+    const { error } = await supabase.from("prestamos").delete().eq("id", id);
+    if (!error) {
+      setPrestamos((p) => p.filter((x) => x.id !== id));
+      setAbonos((p) => p.filter((x) => x.prestamo !== id));
+    }
+  };
+  const addAbono = async (ab) => {
+    const { data, error } = await supabase.from("abonos_prestamo").insert(ab).select();
+    if (!error && data) setAbonos((p) => [...data, ...p]);
+  };
+  const delAbono = async (id) => {
+    const { error } = await supabase.from("abonos_prestamo").delete().eq("id", id);
+    if (!error) setAbonos((p) => p.filter((x) => x.id !== id));
+  };
 
   // ---- Cálculos ----
   // Caja/flujo se mueve por el TOTAL (con IVA); resultado/utilidad por el NETO (sin IVA).
@@ -258,6 +285,22 @@ function Panel({ onLogout, email }) {
     });
   }, [proyectos, movs]);
 
+  // Efecto de los abonos de préstamos en la caja:
+  //  - abono a "por_pagar" = pago de deuda = sale de caja (−)
+  //  - abono a "por_cobrar" = te devuelven = entra a caja (+)
+  const efectoAbonosCaja = useMemo(() => {
+    const tipoDe = (prestId) => {
+      const p = prestamos.find((x) => x.id === prestId);
+      return p ? p.tipo : null;
+    };
+    return abonos.reduce((s, a) => {
+      const t = tipoDe(a.prestamo);
+      if (t === "por_pagar") return s - a.monto;
+      if (t === "por_cobrar") return s + a.monto;
+      return s;
+    }, 0);
+  }, [abonos, prestamos]);
+
   const totales = useMemo(() => {
     const ing = movs.filter((x) => x.tipo === "ING").reduce((s, x) => s + x.neto, 0);
     const egr = movs.filter((x) => x.tipo === "EGR").reduce((s, x) => s + x.neto, 0);
@@ -265,8 +308,8 @@ function Panel({ onLogout, email }) {
     const cajaOut = movs.filter((x) => x.tipo === "EGR" && x.pagado).reduce((s, x) => s + montoCaja(x), 0);
     const porCobrar = facturas.filter((f) => f.estado !== "Pagada")
       .reduce((s, f) => s + f.neto * (f.exento ? 1 : 1 + IVA_RATE), 0);
-    return { ing, egr, resultado: ing - egr, caja: cajaIn - cajaOut, porCobrar };
-  }, [movs, facturas]);
+    return { ing, egr, resultado: ing - egr, caja: cajaIn - cajaOut + efectoAbonosCaja, porCobrar };
+  }, [movs, facturas, efectoAbonosCaja]);
 
   const movsFiltrados = useMemo(() => {
     const l = filtroProy === "TODOS" ? movs : movs.filter((x) => x.proyecto === filtroProy);
@@ -297,6 +340,7 @@ function Panel({ onLogout, email }) {
           ["facturacion", "Facturación"],
           ["materiales", "Materiales"],
           ["personal", "Personal"],
+          ["prestamos", "Préstamos"],
           ["proyectos", "Proyectos"],
         ].map(([k, label]) => (
           <button key={k} onClick={() => setTab(k)}
@@ -328,7 +372,7 @@ function Panel({ onLogout, email }) {
                 filtroProy={filtroProy} setFiltroProy={setFiltroProy}
                 onAdd={addMov} onTogglePagado={toggleMovPagado} onDelete={delMov} />
             )}
-            {tab === "caja" && <CajaEmpresa movs={movs} clp={clp} />}
+            {tab === "caja" && <CajaEmpresa movs={movs} clp={clp} efectoAbonos={efectoAbonosCaja} />}
             {tab === "iva" && <IvaMensual movs={movs} facturas={facturas} clp={clp} />}
             {tab === "facturacion" && (
               <Facturacion facturas={facturas} proyectos={proyectos}
@@ -346,6 +390,11 @@ function Panel({ onLogout, email }) {
                 onToggleDia={toggleDia} onAddAnticipo={addAnticipo}
                 onToggleAnticipo={toggleAnticipo} onDelAnticipo={delAnticipo}
                 onAddLiqItem={addLiqItem} onDelLiqItem={delLiqItem} />
+            )}
+            {tab === "prestamos" && (
+              <Prestamos prestamos={prestamos} abonos={abonos} clp={clp}
+                onAddPrestamo={addPrestamo} onDelPrestamo={delPrestamo}
+                onAddAbono={addAbono} onDelAbono={delAbono} />
             )}
             {tab === "proyectos" && (
               <Proyectos resumen={resumenProyectos} onAdd={addProyecto} />
@@ -623,7 +672,7 @@ function IvaMensual({ movs, facturas, clp }) {
 }
 
 // ---------- CAJA EMPRESA ----------
-function CajaEmpresa({ movs, clp }) {
+function CajaEmpresa({ movs, clp, efectoAbonos = 0 }) {
   const [base, setBase] = useState("pagado");
   const incluir = (m) => base === "comprometido" ? true : m.pagado;
   const relevantes = movs.filter(incluir);
@@ -635,7 +684,7 @@ function CajaEmpresa({ movs, clp }) {
   const ingresos = relevantes.filter((m) => m.tipo === "ING").reduce((s, m) => s + montoCaja(m), 0);
   const egresos = relevantes.filter((m) => m.tipo === "EGR").reduce((s, m) => s + montoCaja(m), 0);
   const saldo = ingresos - egresos;
-  const cajaReal = movs.filter((m) => m.pagado).reduce((s, m) => s + (m.tipo === "ING" ? montoCaja(m) : -montoCaja(m)), 0);
+  const cajaReal = movs.filter((m) => m.pagado).reduce((s, m) => s + (m.tipo === "ING" ? montoCaja(m) : -montoCaja(m)), 0) + efectoAbonos;
 
   const meses = {};
   relevantes.forEach((m) => {
@@ -1346,6 +1395,161 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
             </div>
           </div>
         </>
+      )}
+    </div>
+  );
+}
+
+// ---------- PRÉSTAMOS ----------
+function Prestamos({ prestamos, abonos, clp, onAddPrestamo, onDelPrestamo, onAddAbono, onDelAbono }) {
+  const [vista, setVista] = useState("por_pagar");
+  const [nuevo, setNuevo] = useState({ contraparte: "", detalle: "", monto: "", fecha: today() });
+  const [err, setErr] = useState("");
+  const [abonoDe, setAbonoDe] = useState(null); // id del préstamo al que se agrega abono
+  const [ab, setAb] = useState({ fecha: today(), monto: "" });
+
+  const crear = async () => {
+    setErr("");
+    if (!nuevo.contraparte.trim() || !parseInt(nuevo.monto, 10)) { setErr("Contraparte y monto son obligatorios."); return; }
+    const error = await onAddPrestamo({
+      tipo: vista, contraparte: nuevo.contraparte.trim(), detalle: nuevo.detalle.trim() || null,
+      monto: parseInt(nuevo.monto, 10), fecha: nuevo.fecha, activo: true,
+    });
+    if (error) { setErr("No se pudo guardar."); return; }
+    setNuevo({ contraparte: "", detalle: "", monto: "", fecha: today() });
+  };
+
+  const crearAbono = async (prestamoId) => {
+    const monto = parseInt(ab.monto, 10);
+    if (!monto || monto <= 0) return;
+    await onAddAbono({ prestamo: prestamoId, fecha: ab.fecha, monto });
+    setAb({ fecha: today(), monto: "" });
+    setAbonoDe(null);
+  };
+
+  const lista = prestamos.filter((p) => p.tipo === vista);
+  const abonosDe = (prestId) => abonos.filter((a) => a.prestamo === prestId);
+  const pagado = (prestId) => abonosDe(prestId).reduce((s, a) => s + a.monto, 0);
+  const saldo = (p) => p.monto - pagado(p.id);
+  const saldoTotal = lista.reduce((s, p) => s + saldo(p), 0);
+
+  const esPagar = vista === "por_pagar";
+  const acento = esPagar ? "var(--text-danger)" : "var(--text-success)";
+
+  return (
+    <div>
+      <div style={S.toggleWrap}>
+        <button onClick={() => setVista("por_pagar")} style={{ ...S.toggleBtn, ...(esPagar ? S.toggleBtnOn : {}), flex: 1 }}>
+          Por pagar (deuda)
+        </button>
+        <button onClick={() => setVista("por_cobrar")} style={{ ...S.toggleBtn, ...(!esPagar ? S.toggleBtnOn : {}), flex: 1 }}>
+          Por cobrar (me deben)
+        </button>
+      </div>
+
+      <div style={{ ...S.metricGrid, marginTop: 20 }}>
+        <Metric label={esPagar ? "Total que debo" : "Total que me deben"} value={clp(saldoTotal)} tone={esPagar ? "neg" : "pos"} />
+        <Metric label="Préstamos activos" value={lista.filter((p) => saldo(p) > 0).length + " de " + lista.length} />
+      </div>
+
+      <div style={S.card}>
+        <h2 style={S.h2}>{esPagar ? "Registrar deuda / préstamo recibido" : "Registrar préstamo entregado"}</h2>
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 12px" }}>
+          Este monto es el saldo de partida; no entra a la caja. Los abonos que registres después sí se reflejan en la caja.
+        </p>
+        <div style={S.formGrid}>
+          <Field label={esPagar ? "Prestamista / Acreedor" : "Deudor"}>
+            <input value={nuevo.contraparte} onChange={(e) => setNuevo({ ...nuevo, contraparte: e.target.value })}
+              placeholder={esPagar ? "Banco Estado, Juan…" : "Cliente, socio…"} style={S.input} />
+          </Field>
+          <Field label="Detalle (opcional)">
+            <input value={nuevo.detalle} onChange={(e) => setNuevo({ ...nuevo, detalle: e.target.value })}
+              placeholder="crédito capital de trabajo" style={S.input} />
+          </Field>
+          <Field label="Monto total">
+            <input type="number" value={nuevo.monto} onChange={(e) => setNuevo({ ...nuevo, monto: e.target.value })} placeholder="0" style={S.input} />
+          </Field>
+          <Field label="Fecha">
+            <input type="date" value={nuevo.fecha} onChange={(e) => setNuevo({ ...nuevo, fecha: e.target.value })} style={S.input} />
+          </Field>
+          <div style={{ display: "flex", alignItems: "flex-end" }}>
+            <button onClick={crear} style={S.primaryBtn}>Registrar</button>
+          </div>
+        </div>
+        {err && <div style={S.loginError}>{err}</div>}
+      </div>
+
+      {lista.length === 0 ? (
+        <div style={S.card}><div style={S.empty}>Sin préstamos {esPagar ? "por pagar" : "por cobrar"} aún.</div></div>
+      ) : (
+        lista.map((p) => {
+          const pg = pagado(p.id);
+          const sd = saldo(p);
+          const pct = p.monto > 0 ? Math.min(100, Math.round((pg / p.monto) * 100)) : 0;
+          const liquidado = sd <= 0;
+          return (
+            <div key={p.id} style={S.card}>
+              <div style={S.cardHead}>
+                <div>
+                  <h2 style={{ ...S.h2, margin: 0 }}>{p.contraparte}</h2>
+                  {p.detalle && <div style={{ fontSize: 13, color: "var(--text-secondary)" }}>{p.detalle}</div>}
+                </div>
+                <button onClick={() => { if (confirm(`¿Eliminar este préstamo y sus abonos?`)) onDelPrestamo(p.id); }} style={S.delBtn}>✕</button>
+              </div>
+              <div style={S.pagoRow}><span>Monto total</span><b>{clp(p.monto)}</b></div>
+              <div style={S.pagoRow}><span>Abonado</span><b style={{ color: "var(--text-success)" }}>{clp(pg)}</b></div>
+              <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 8 }}>
+                <span style={{ fontWeight: 600 }}>Saldo pendiente</span>
+                <b style={{ fontSize: 17, color: liquidado ? "var(--text-success)" : acento }}>
+                  {liquidado ? "Liquidado ✓" : clp(sd)}
+                </b>
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <div style={S.barTrack}><div style={{ ...S.barFill, width: pct + "%" }} /></div>
+                <div style={S.barLabel}>{pct}% {esPagar ? "pagado" : "recuperado"}</div>
+              </div>
+
+              {/* Abonos */}
+              {abonosDe(p.id).length > 0 && (
+                <table style={{ ...S.table, marginTop: 12 }}>
+                  <thead><tr>
+                    <th style={S.th}>Fecha abono</th><th style={S.thR}>Monto</th><th style={S.thC}></th>
+                  </tr></thead>
+                  <tbody>
+                    {abonosDe(p.id).map((a) => (
+                      <tr key={a.id}>
+                        <td style={S.td}>{a.fecha}</td>
+                        <td style={S.tdR}>{clp(a.monto)}</td>
+                        <td style={S.tdC}><button onClick={() => onDelAbono(a.id)} style={S.delBtn}>✕</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+
+              {/* Agregar abono */}
+              {abonoDe === p.id ? (
+                <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginTop: 12, flexWrap: "wrap" }}>
+                  <Field label="Fecha">
+                    <input type="date" value={ab.fecha} onChange={(e) => setAb({ ...ab, fecha: e.target.value })} style={S.input} />
+                  </Field>
+                  <Field label={esPagar ? "Monto pagado" : "Monto recibido"}>
+                    <input type="number" value={ab.monto} onChange={(e) => setAb({ ...ab, monto: e.target.value })} placeholder="0" style={S.input} />
+                  </Field>
+                  <button onClick={() => crearAbono(p.id)} style={S.primaryBtn}>Guardar</button>
+                  <button onClick={() => setAbonoDe(null)} style={S.logoutBtn}>Cancelar</button>
+                </div>
+              ) : (
+                !liquidado && (
+                  <button onClick={() => { setAbonoDe(p.id); setAb({ fecha: today(), monto: "" }); }}
+                    style={{ ...S.primaryBtn, marginTop: 12 }}>
+                    + {esPagar ? "Registrar pago" : "Registrar cobro"}
+                  </button>
+                )
+              )}
+            </div>
+          );
+        })
       )}
     </div>
   );
