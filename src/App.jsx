@@ -182,13 +182,16 @@ function Panel({ onLogout, email }) {
   };
 
   // ---- Cálculos ----
+  // Caja/flujo se mueve por el TOTAL (con IVA); resultado/utilidad por el NETO (sin IVA).
+  const montoCaja = (x) => (x.total != null ? x.total : x.neto);
+
   const resumenProyectos = useMemo(() => {
     return proyectos.map((p) => {
       const m = movs.filter((x) => x.proyecto === p.id);
       const ing = m.filter((x) => x.tipo === "ING").reduce((s, x) => s + x.neto, 0);
       const egr = m.filter((x) => x.tipo === "EGR").reduce((s, x) => s + x.neto, 0);
-      const cajaIn = m.filter((x) => x.tipo === "ING" && x.pagado).reduce((s, x) => s + x.neto, 0);
-      const cajaOut = m.filter((x) => x.tipo === "EGR" && x.pagado).reduce((s, x) => s + x.neto, 0);
+      const cajaIn = m.filter((x) => x.tipo === "ING" && x.pagado).reduce((s, x) => s + montoCaja(x), 0);
+      const cajaOut = m.filter((x) => x.tipo === "EGR" && x.pagado).reduce((s, x) => s + montoCaja(x), 0);
       return { ...p, ingresos: ing, egresos: egr, resultado: ing - egr,
         caja: cajaIn - cajaOut, porFacturar: (p.presupuesto || 0) - ing };
     });
@@ -197,8 +200,8 @@ function Panel({ onLogout, email }) {
   const totales = useMemo(() => {
     const ing = movs.filter((x) => x.tipo === "ING").reduce((s, x) => s + x.neto, 0);
     const egr = movs.filter((x) => x.tipo === "EGR").reduce((s, x) => s + x.neto, 0);
-    const cajaIn = movs.filter((x) => x.tipo === "ING" && x.pagado).reduce((s, x) => s + x.neto, 0);
-    const cajaOut = movs.filter((x) => x.tipo === "EGR" && x.pagado).reduce((s, x) => s + x.neto, 0);
+    const cajaIn = movs.filter((x) => x.tipo === "ING" && x.pagado).reduce((s, x) => s + montoCaja(x), 0);
+    const cajaOut = movs.filter((x) => x.tipo === "EGR" && x.pagado).reduce((s, x) => s + montoCaja(x), 0);
     const porCobrar = facturas.filter((f) => f.estado !== "Pagada")
       .reduce((s, f) => s + f.neto * (f.exento ? 1 : 1 + IVA_RATE), 0);
     return { ing, egr, resultado: ing - egr, caja: cajaIn - cajaOut, porCobrar };
@@ -343,14 +346,18 @@ function Movimientos({ movs, proyectos, filtroProy, setFiltroProy, onAdd, onTogg
   const submit = () => {
     const bruto = parseFloat(f.monto);
     if (!bruto || bruto <= 0) return;
+    // El monto que ingresa el usuario es el que se mueve en el banco (total).
+    // Si incluye IVA, el neto se obtiene dividiendo; si no, neto = total.
+    const total = Math.round(bruto);
     const neto = f.incluyeIva ? Math.round(bruto / (1 + IVA_RATE)) : Math.round(bruto);
     onAdd({
       fecha: f.fecha, proyecto: f.proyecto || null, tipo: f.tipo, categoria: f.categoria,
-      detalle: f.detalle, neto, doc: f.doc, pagado: f.pagado,
+      detalle: f.detalle, neto, total, doc: f.doc, pagado: f.pagado,
     });
     setF({ ...f, detalle: "", monto: "" });
   };
 
+  const previewTotal = f.monto ? Math.round(parseFloat(f.monto)) : 0;
   const previewNeto = f.monto
     ? (f.incluyeIva ? Math.round(parseFloat(f.monto) / (1 + IVA_RATE)) : Math.round(parseFloat(f.monto))) : 0;
 
@@ -403,12 +410,16 @@ function Movimientos({ movs, proyectos, filtroProy, setFiltroProy, onAdd, onTogg
               Ya pagado
             </label>
           </Field>
-          <div style={{ display: "flex", alignItems: "flex-end", gap: 12 }}>
-            <div style={{ flex: 1 }}>
-              <div style={S.fieldLabel}>Neto calculado</div>
-              <div style={S.previewVal}>{clp(previewNeto)}</div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 20 }}>
+            <div>
+              <div style={S.fieldLabel}>Total (a caja)</div>
+              <div style={S.previewVal}>{clp(previewTotal)}</div>
             </div>
-            <button onClick={submit} style={S.primaryBtn}>Agregar</button>
+            <div>
+              <div style={S.fieldLabel}>Neto (a resultado)</div>
+              <div style={S.previewSmall}>{clp(previewNeto)}</div>
+            </div>
+            <button onClick={submit} style={{ ...S.primaryBtn, marginLeft: "auto" }}>Agregar</button>
           </div>
         </div>
       </div>
@@ -424,10 +435,10 @@ function Movimientos({ movs, proyectos, filtroProy, setFiltroProy, onAdd, onTogg
         <table style={S.table}>
           <thead><tr>
             <th style={S.th}>Fecha</th><th style={S.th}>Proyecto</th><th style={S.th}>Categoría</th>
-            <th style={S.th}>Detalle</th><th style={S.thR}>Neto</th><th style={S.thC}>Pagado</th><th style={S.thC}></th>
+            <th style={S.th}>Detalle</th><th style={S.thR}>Neto</th><th style={S.thR}>Total (caja)</th><th style={S.thC}>Pagado</th><th style={S.thC}></th>
           </tr></thead>
           <tbody>
-            {movs.length === 0 && <tr><td colSpan={7} style={S.empty}>Aún no hay movimientos. Carga el primero arriba.</td></tr>}
+            {movs.length === 0 && <tr><td colSpan={8} style={S.empty}>Aún no hay movimientos. Carga el primero arriba.</td></tr>}
             {movs.map((m) => (
               <tr key={m.id}>
                 <td style={S.td}>{m.fecha}</td>
@@ -437,7 +448,8 @@ function Movimientos({ movs, proyectos, filtroProy, setFiltroProy, onAdd, onTogg
                     color: m.tipo === "ING" ? "var(--text-success)" : "var(--text-danger)" }}>{m.tipo}</span>{" "}{m.categoria}
                 </td>
                 <td style={{ ...S.td, color: "var(--text-secondary)" }}>{m.detalle || "—"}</td>
-                <td style={S.tdR}>{clp(m.neto)}</td>
+                <td style={{ ...S.tdR, color: "var(--text-muted)" }}>{clp(m.neto)}</td>
+                <td style={{ ...S.tdR, fontWeight: 500 }}>{clp(m.total != null ? m.total : m.neto)}</td>
                 <td style={S.tdC}>
                   <button onClick={() => onTogglePagado(m.id, m.pagado)} style={{ ...S.tinyBtn,
                     background: m.pagado ? "var(--bg-success)" : "var(--surface-1)",
@@ -461,17 +473,21 @@ function CajaEmpresa({ movs, clp }) {
   const incluir = (m) => base === "comprometido" ? true : m.pagado;
   const relevantes = movs.filter(incluir);
 
-  const ingresos = relevantes.filter((m) => m.tipo === "ING").reduce((s, m) => s + m.neto, 0);
-  const egresos = relevantes.filter((m) => m.tipo === "EGR").reduce((s, m) => s + m.neto, 0);
+  // La caja se mueve por el monto TOTAL (con IVA): es la plata que entra/sale del banco.
+  // Se usa total; si un registro antiguo no tuviera total, se cae al neto como respaldo.
+  const montoCaja = (m) => (m.total != null ? m.total : m.neto);
+
+  const ingresos = relevantes.filter((m) => m.tipo === "ING").reduce((s, m) => s + montoCaja(m), 0);
+  const egresos = relevantes.filter((m) => m.tipo === "EGR").reduce((s, m) => s + montoCaja(m), 0);
   const saldo = ingresos - egresos;
-  const cajaReal = movs.filter((m) => m.pagado).reduce((s, m) => s + (m.tipo === "ING" ? m.neto : -m.neto), 0);
+  const cajaReal = movs.filter((m) => m.pagado).reduce((s, m) => s + (m.tipo === "ING" ? montoCaja(m) : -montoCaja(m)), 0);
 
   const meses = {};
   relevantes.forEach((m) => {
     const mes = (m.fecha || "").slice(0, 7);
     if (!mes) return;
     if (!meses[mes]) meses[mes] = { ing: 0, egr: 0 };
-    if (m.tipo === "ING") meses[mes].ing += m.neto; else meses[mes].egr += m.neto;
+    if (m.tipo === "ING") meses[mes].ing += montoCaja(m); else meses[mes].egr += montoCaja(m);
   });
   const mesesOrden = Object.keys(meses).sort();
   let acumulado = 0;
@@ -486,7 +502,7 @@ function CajaEmpresa({ movs, clp }) {
     const n = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
     return `${n[parseInt(m, 10) - 1]} ${y}`;
   };
-  const gastosGenerales = relevantes.filter((m) => m.tipo === "EGR" && !m.proyecto).reduce((s, m) => s + m.neto, 0);
+  const gastosGenerales = relevantes.filter((m) => m.tipo === "EGR" && !m.proyecto).reduce((s, m) => s + montoCaja(m), 0);
   const dataGrafico = filas.map((r) => ({ mes: nombreMes(r.mes), Ingresos: r.ing, Egresos: r.egr, Acumulado: r.acumulado }));
   const miles = (v) => "$" + Math.round(v / 1000).toLocaleString("es-CL") + "k";
 
