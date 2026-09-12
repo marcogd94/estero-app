@@ -110,12 +110,13 @@ function Panel({ onLogout, email }) {
   const [trabajadores, setTrabajadores] = useState([]);
   const [dias, setDias] = useState([]);
   const [anticipos, setAnticipos] = useState([]);
+  const [liqItems, setLiqItems] = useState([]);
   const [filtroProy, setFiltroProy] = useState("TODOS");
   const [cargando, setCargando] = useState(true);
 
   const cargarTodo = async () => {
     setCargando(true);
-    const [p, m, f, mat, tr, di, an] = await Promise.all([
+    const [p, m, f, mat, tr, di, an, li] = await Promise.all([
       supabase.from("proyectos").select("*").order("id"),
       supabase.from("movimientos").select("*").order("fecha", { ascending: false }),
       supabase.from("facturas").select("*").order("fecha", { ascending: false }),
@@ -123,6 +124,7 @@ function Panel({ onLogout, email }) {
       supabase.from("trabajadores").select("*").order("nombre"),
       supabase.from("dias_trabajados").select("*"),
       supabase.from("anticipos").select("*").order("fecha", { ascending: false }),
+      supabase.from("liquidacion_items").select("*"),
     ]);
     setProyectos(p.data || []);
     setMovs(m.data || []);
@@ -131,6 +133,7 @@ function Panel({ onLogout, email }) {
     setTrabajadores(tr.data || []);
     setDias(di.data || []);
     setAnticipos(an.data || []);
+    setLiqItems(li.data || []);
     setCargando(false);
   };
 
@@ -228,6 +231,15 @@ function Panel({ onLogout, email }) {
   const delAnticipo = async (id) => {
     const { error } = await supabase.from("anticipos").delete().eq("id", id);
     if (!error) setAnticipos((p) => p.filter((x) => x.id !== id));
+  };
+  // ---- CRUD items de liquidación (haberes/descuentos libres) ----
+  const addLiqItem = async (it) => {
+    const { data, error } = await supabase.from("liquidacion_items").insert(it).select();
+    if (!error && data) setLiqItems((p) => [...p, ...data]);
+  };
+  const delLiqItem = async (id) => {
+    const { error } = await supabase.from("liquidacion_items").delete().eq("id", id);
+    if (!error) setLiqItems((p) => p.filter((x) => x.id !== id));
   };
 
   // ---- Cálculos ----
@@ -329,10 +341,11 @@ function Panel({ onLogout, email }) {
             )}
             {tab === "personal" && (
               <Personal trabajadores={trabajadores} proyectos={proyectos}
-                dias={dias} anticipos={anticipos} clp={clp}
+                dias={dias} anticipos={anticipos} liqItems={liqItems} clp={clp}
                 onAddTrabajador={addTrabajador} onDelTrabajador={delTrabajador}
                 onToggleDia={toggleDia} onAddAnticipo={addAnticipo}
-                onToggleAnticipo={toggleAnticipo} onDelAnticipo={delAnticipo} />
+                onToggleAnticipo={toggleAnticipo} onDelAnticipo={delAnticipo}
+                onAddLiqItem={addLiqItem} onDelLiqItem={delLiqItem} />
             )}
             {tab === "proyectos" && (
               <Proyectos resumen={resumenProyectos} onAdd={addProyecto} />
@@ -1055,13 +1068,15 @@ function Proyectos({ resumen, onAdd }) {
 }
 
 // ---------- PERSONAL ----------
-function Personal({ trabajadores, proyectos, dias, anticipos, clp,
-  onAddTrabajador, onDelTrabajador, onToggleDia, onAddAnticipo, onToggleAnticipo, onDelAnticipo }) {
+function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
+  onAddTrabajador, onDelTrabajador, onToggleDia, onAddAnticipo, onToggleAnticipo, onDelAnticipo,
+  onAddLiqItem, onDelLiqItem }) {
   const [nuevo, setNuevo] = useState({ nombre: "", valor_dia: "", proyecto: "" });
   const [errT, setErrT] = useState("");
   const [sel, setSel] = useState(null); // id del trabajador seleccionado para el calendario
   const [mes, setMes] = useState(today().slice(0, 7)); // YYYY-MM
   const [antNuevo, setAntNuevo] = useState({ fecha: today(), monto: "" });
+  const [itNuevo, setItNuevo] = useState({ tipo: "haber", concepto: "", monto: "" });
 
   const DIAS_ESPERADOS = 16;
 
@@ -1096,8 +1111,22 @@ function Personal({ trabajadores, proyectos, dias, anticipos, clp,
   const antSel = anticipos.filter((a) => a.trabajador === sel);
   const antPendientes = antSel.filter((a) => !a.descontado).reduce((s, a) => s + a.monto, 0);
 
-  const pagoBruto = trabajadorSel ? nTrabajados * trabajadorSel.valor_dia : 0;
-  const liquido = pagoBruto - antPendientes;
+  const sueldoBase = trabajadorSel ? nTrabajados * trabajadorSel.valor_dia : 0;
+
+  // Items de liquidación del trabajador y mes seleccionados
+  const itemsMes = liqItems.filter((it) => it.trabajador === sel && it.mes === mes);
+  const haberesExtra = itemsMes.filter((it) => it.tipo === "haber").reduce((s, it) => s + it.monto, 0);
+  const descuentos = itemsMes.filter((it) => it.tipo === "descuento").reduce((s, it) => s + it.monto, 0);
+
+  const totalHaberes = sueldoBase + haberesExtra;
+  const liquido = totalHaberes - descuentos - antPendientes;
+
+  const crearItem = async () => {
+    const monto = parseInt(itNuevo.monto, 10);
+    if (!itNuevo.concepto.trim() || !monto || monto <= 0 || !sel) return;
+    await onAddLiqItem({ trabajador: sel, mes, tipo: itNuevo.tipo, concepto: itNuevo.concepto.trim(), monto });
+    setItNuevo({ ...itNuevo, concepto: "", monto: "" });
+  };
 
   const crearAnticipo = async () => {
     const monto = parseInt(antNuevo.monto, 10);
@@ -1247,15 +1276,73 @@ function Personal({ trabajadores, proyectos, dias, anticipos, clp,
             )}
           </div>
 
-          {/* Resumen de pago */}
+          {/* Liquidación: haberes y descuentos libres */}
           <div style={S.card}>
-            <h2 style={S.h2}>Pago del mes — {nombreMesTxt(mes)}</h2>
-            <div style={S.pagoRow}><span>Días trabajados</span><b>{nTrabajados} × {clp(trabajadorSel.valor_dia)}</b></div>
-            <div style={S.pagoRow}><span>Pago bruto</span><b>{clp(pagoBruto)}</b></div>
-            <div style={S.pagoRow}><span>Anticipos pendientes por descontar</span><b style={{ color: "var(--text-danger)" }}>− {clp(antPendientes)}</b></div>
-            <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 10, marginTop: 4 }}>
-              <span style={{ fontWeight: 600, fontSize: 15 }}>Líquido a pagar</span>
-              <b style={{ fontSize: 20, color: "var(--text-success)" }}>{clp(liquido)}</b>
+            <h2 style={S.h2}>Liquidación — {nombreMesTxt(mes)}</h2>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px" }}>
+              El sueldo base sale de los días trabajados. Agrega gratificación y otros haberes, y los descuentos legales
+              (AFP, salud, etc.) con el monto que definas. Es una estimación para provisionar; la liquidación oficial la hace tu contador.
+            </p>
+
+            {/* Agregar concepto */}
+            <div style={{ ...S.formGrid, marginBottom: 16 }}>
+              <Field label="Tipo">
+                <select value={itNuevo.tipo} onChange={(e) => setItNuevo({ ...itNuevo, tipo: e.target.value })} style={S.input}>
+                  <option value="haber">Haber (suma)</option>
+                  <option value="descuento">Descuento (resta)</option>
+                </select>
+              </Field>
+              <Field label="Concepto">
+                <input value={itNuevo.concepto} onChange={(e) => setItNuevo({ ...itNuevo, concepto: e.target.value })}
+                  placeholder={itNuevo.tipo === "haber" ? "Gratificación, bono…" : "AFP, Salud 7%…"} style={S.input} />
+              </Field>
+              <Field label="Monto">
+                <input type="number" value={itNuevo.monto} onChange={(e) => setItNuevo({ ...itNuevo, monto: e.target.value })} placeholder="0" style={S.input} />
+              </Field>
+              <div style={{ display: "flex", alignItems: "flex-end" }}>
+                <button onClick={crearItem} style={S.primaryBtn}>Agregar</button>
+              </div>
+            </div>
+
+            {/* Detalle de la liquidación */}
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-success)", margin: "4px 0 6px" }}>HABERES</div>
+            <div style={S.pagoRow}>
+              <span>Sueldo base ({nTrabajados} días × {clp(trabajadorSel.valor_dia)})</span>
+              <b>{clp(sueldoBase)}</b>
+            </div>
+            {itemsMes.filter((it) => it.tipo === "haber").map((it) => (
+              <div key={it.id} style={S.pagoRow}>
+                <span>{it.concepto} <button onClick={() => onDelLiqItem(it.id)} style={S.delMini}>✕</button></span>
+                <b>{clp(it.monto)}</b>
+              </div>
+            ))}
+            <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 6 }}>
+              <span style={{ fontWeight: 600 }}>Total haberes</span><b>{clp(totalHaberes)}</b>
+            </div>
+
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-danger)", margin: "16px 0 6px" }}>DESCUENTOS</div>
+            {itemsMes.filter((it) => it.tipo === "descuento").map((it) => (
+              <div key={it.id} style={S.pagoRow}>
+                <span>{it.concepto} <button onClick={() => onDelLiqItem(it.id)} style={S.delMini}>✕</button></span>
+                <b style={{ color: "var(--text-danger)" }}>− {clp(it.monto)}</b>
+              </div>
+            ))}
+            {antPendientes > 0 && (
+              <div style={S.pagoRow}>
+                <span>Anticipos pendientes</span><b style={{ color: "var(--text-danger)" }}>− {clp(antPendientes)}</b>
+              </div>
+            )}
+            {itemsMes.filter((it) => it.tipo === "descuento").length === 0 && antPendientes === 0 && (
+              <div style={{ ...S.pagoRow, color: "var(--text-muted)" }}><span>Sin descuentos aún</span><span>—</span></div>
+            )}
+            <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 6 }}>
+              <span style={{ fontWeight: 600 }}>Total descuentos</span>
+              <b style={{ color: "var(--text-danger)" }}>− {clp(descuentos + antPendientes)}</b>
+            </div>
+
+            <div style={{ ...S.pagoRow, borderTop: "1.5px solid var(--border-strong)", paddingTop: 12, marginTop: 8 }}>
+              <span style={{ fontWeight: 700, fontSize: 16 }}>Líquido a pagar</span>
+              <b style={{ fontSize: 22, color: "var(--text-success)" }}>{clp(liquido)}</b>
             </div>
           </div>
         </>
@@ -1335,6 +1422,7 @@ const S = {
   calDay: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: 46, borderRadius: 8, border: "0.5px solid var(--border-strong)", background: "var(--surface-1)", color: "var(--text-secondary)", fontSize: 14, cursor: "pointer", fontWeight: 500 },
   calDayOn: { background: "#1D9E75", color: "#fff", border: "0.5px solid #1D9E75" },
   pagoRow: { display: "flex", justifyContent: "space-between", fontSize: 14, padding: "5px 0", color: "var(--text-secondary)" },
+  delMini: { border: "none", background: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11, marginLeft: 6, padding: 0 },
 
   projGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16 },
   projCard: { background: "var(--surface-2)", border: "0.5px solid var(--border)", borderRadius: 12, padding: "16px 18px" },
