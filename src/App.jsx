@@ -107,21 +107,30 @@ function Panel({ onLogout, email }) {
   const [movs, setMovs] = useState([]);
   const [facturas, setFacturas] = useState([]);
   const [materiales, setMateriales] = useState([]);
+  const [trabajadores, setTrabajadores] = useState([]);
+  const [dias, setDias] = useState([]);
+  const [anticipos, setAnticipos] = useState([]);
   const [filtroProy, setFiltroProy] = useState("TODOS");
   const [cargando, setCargando] = useState(true);
 
   const cargarTodo = async () => {
     setCargando(true);
-    const [p, m, f, mat] = await Promise.all([
+    const [p, m, f, mat, tr, di, an] = await Promise.all([
       supabase.from("proyectos").select("*").order("id"),
       supabase.from("movimientos").select("*").order("fecha", { ascending: false }),
       supabase.from("facturas").select("*").order("fecha", { ascending: false }),
       supabase.from("materiales").select("*").order("id"),
+      supabase.from("trabajadores").select("*").order("nombre"),
+      supabase.from("dias_trabajados").select("*"),
+      supabase.from("anticipos").select("*").order("fecha", { ascending: false }),
     ]);
     setProyectos(p.data || []);
     setMovs(m.data || []);
     setFacturas(f.data || []);
     setMateriales(mat.data || []);
+    setTrabajadores(tr.data || []);
+    setDias(di.data || []);
+    setAnticipos(an.data || []);
     setCargando(false);
   };
 
@@ -181,6 +190,46 @@ function Panel({ onLogout, email }) {
     if (!error) setMateriales((p) => p.filter((x) => x.id !== id));
   };
 
+  // ---- CRUD trabajadores ----
+  const addTrabajador = async (t) => {
+    const { data, error } = await supabase.from("trabajadores").insert(t).select();
+    if (!error && data) setTrabajadores((p) => [...p, ...data]);
+    return error;
+  };
+  const delTrabajador = async (id) => {
+    const { error } = await supabase.from("trabajadores").delete().eq("id", id);
+    if (!error) {
+      setTrabajadores((p) => p.filter((x) => x.id !== id));
+      setDias((p) => p.filter((x) => x.trabajador !== id));
+      setAnticipos((p) => p.filter((x) => x.trabajador !== id));
+    }
+  };
+  // ---- Días trabajados: alternar un día ----
+  const toggleDia = async (trabajadorId, fecha) => {
+    const existe = dias.find((d) => d.trabajador === trabajadorId && d.fecha === fecha);
+    if (existe) {
+      const { error } = await supabase.from("dias_trabajados").delete().eq("id", existe.id);
+      if (!error) setDias((p) => p.filter((x) => x.id !== existe.id));
+    } else {
+      const { data, error } = await supabase.from("dias_trabajados")
+        .insert({ trabajador: trabajadorId, fecha }).select();
+      if (!error && data) setDias((p) => [...p, ...data]);
+    }
+  };
+  // ---- CRUD anticipos ----
+  const addAnticipo = async (a) => {
+    const { data, error } = await supabase.from("anticipos").insert(a).select();
+    if (!error && data) setAnticipos((p) => [...data, ...p]);
+  };
+  const toggleAnticipo = async (id, descontado) => {
+    const { error } = await supabase.from("anticipos").update({ descontado: !descontado }).eq("id", id);
+    if (!error) setAnticipos((p) => p.map((x) => x.id === id ? { ...x, descontado: !descontado } : x));
+  };
+  const delAnticipo = async (id) => {
+    const { error } = await supabase.from("anticipos").delete().eq("id", id);
+    if (!error) setAnticipos((p) => p.filter((x) => x.id !== id));
+  };
+
   // ---- Cálculos ----
   // Caja/flujo se mueve por el TOTAL (con IVA); resultado/utilidad por el NETO (sin IVA).
   const montoCaja = (x) => (x.total != null ? x.total : x.neto);
@@ -232,8 +281,10 @@ function Panel({ onLogout, email }) {
           ["resumen", "Resumen"],
           ["movimientos", "Movimientos"],
           ["caja", "Caja empresa"],
+          ["iva", "IVA (F29)"],
           ["facturacion", "Facturación"],
           ["materiales", "Materiales"],
+          ["personal", "Personal"],
           ["proyectos", "Proyectos"],
         ].map(([k, label]) => (
           <button key={k} onClick={() => setTab(k)}
@@ -266,6 +317,7 @@ function Panel({ onLogout, email }) {
                 onAdd={addMov} onTogglePagado={toggleMovPagado} onDelete={delMov} />
             )}
             {tab === "caja" && <CajaEmpresa movs={movs} clp={clp} />}
+            {tab === "iva" && <IvaMensual movs={movs} facturas={facturas} clp={clp} />}
             {tab === "facturacion" && (
               <Facturacion facturas={facturas} proyectos={proyectos}
                 onAdd={addFactura} onEstado={setEstadoFactura} onDelete={delFactura} />
@@ -274,6 +326,13 @@ function Panel({ onLogout, email }) {
               <Materiales materiales={materiales} proyectos={proyectos}
                 filtroProy={filtroProy} setFiltroProy={setFiltroProy}
                 onAdd={addMaterial} onComprar={setComprado} onDelete={delMaterial} />
+            )}
+            {tab === "personal" && (
+              <Personal trabajadores={trabajadores} proyectos={proyectos}
+                dias={dias} anticipos={anticipos} clp={clp}
+                onAddTrabajador={addTrabajador} onDelTrabajador={delTrabajador}
+                onToggleDia={toggleDia} onAddAnticipo={addAnticipo}
+                onToggleAnticipo={toggleAnticipo} onDelAnticipo={delAnticipo} />
             )}
             {tab === "proyectos" && (
               <Proyectos resumen={resumenProyectos} onAdd={addProyecto} />
@@ -460,6 +519,89 @@ function Movimientos({ movs, proyectos, filtroProy, setFiltroProy, onAdd, onTogg
                 <td style={S.tdC}><button onClick={() => onDelete(m.id)} style={S.delBtn}>✕</button></td>
               </tr>
             ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ---------- IVA MENSUAL (F29) ----------
+function IvaMensual({ movs, facturas, clp }) {
+  const nombreMes = (ym) => {
+    const [y, m] = ym.split("-");
+    const n = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+    return `${n[parseInt(m, 10) - 1]} ${y}`;
+  };
+
+  // Débito: IVA de facturas emitidas no exentas, por mes de emisión.
+  // Crédito: IVA de egresos con documento FACTURA que llevaban IVA (total > neto), por mes.
+  //   Se toma el mes por fecha; para gastos, solo los pagados (criterio elegido: por fecha de pago).
+  const meses = {};
+  const add = (mes, campo, val) => {
+    if (!mes) return;
+    if (!meses[mes]) meses[mes] = { debito: 0, credito: 0 };
+    meses[mes][campo] += val;
+  };
+
+  facturas.forEach((f) => {
+    if (f.exento) return;
+    const iva = Math.round(f.neto * IVA_RATE);
+    add((f.fecha || "").slice(0, 7), "debito", iva);
+  });
+
+  movs.forEach((m) => {
+    if (m.tipo !== "EGR") return;
+    if (m.doc !== "FACTURA") return;      // solo factura da crédito
+    if (!m.pagado) return;                // por fecha de pago
+    const total = m.total != null ? m.total : m.neto;
+    const iva = total - m.neto;           // 0 si fue sin IVA
+    if (iva <= 0) return;
+    add((m.fecha || "").slice(0, 7), "credito", iva);
+  });
+
+  const filas = Object.keys(meses).sort().reverse().map((mes) => {
+    const { debito, credito } = meses[mes];
+    const aPagar = debito - credito;
+    return { mes, debito, credito, aPagar };
+  });
+
+  return (
+    <div>
+      <div style={S.card}>
+        <h2 style={S.h2}>IVA mensual — estimación para el F29</h2>
+        <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 4px" }}>
+          <b>Débito</b> = IVA de tus facturas emitidas (lo que cobraste). <b>Crédito</b> = IVA de tus
+          gastos con factura (lo que pagaste). <b>A pagar</b> = débito − crédito.
+        </p>
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: 0 }}>
+          Estimación para planificar cuánto provisionar. El monto oficial lo cuadra tu contador con el SII.
+        </p>
+      </div>
+
+      <div style={S.card}>
+        <table style={S.table}>
+          <thead><tr>
+            <th style={S.th}>Mes</th>
+            <th style={S.thR}>IVA débito (ventas)</th>
+            <th style={S.thR}>IVA crédito (compras)</th>
+            <th style={S.thR}>Resultado</th>
+          </tr></thead>
+          <tbody>
+            {filas.length === 0 && <tr><td colSpan={4} style={S.empty}>Aún no hay datos para calcular IVA.</td></tr>}
+            {filas.map((r) => {
+              const aFavor = r.aPagar < 0;
+              return (
+                <tr key={r.mes}>
+                  <td style={S.td}><b>{nombreMes(r.mes)}</b></td>
+                  <td style={{ ...S.tdR, color: "var(--text-success)" }}>{clp(r.debito)}</td>
+                  <td style={{ ...S.tdR, color: "var(--text-danger)" }}>{clp(r.credito)}</td>
+                  <td style={{ ...S.tdR, fontWeight: 600, color: aFavor ? "var(--text-accent)" : "var(--text-primary)" }}>
+                    {aFavor ? `${clp(Math.abs(r.aPagar))} a favor` : `${clp(r.aPagar)} a pagar`}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -912,6 +1054,216 @@ function Proyectos({ resumen, onAdd }) {
   );
 }
 
+// ---------- PERSONAL ----------
+function Personal({ trabajadores, proyectos, dias, anticipos, clp,
+  onAddTrabajador, onDelTrabajador, onToggleDia, onAddAnticipo, onToggleAnticipo, onDelAnticipo }) {
+  const [nuevo, setNuevo] = useState({ nombre: "", valor_dia: "", proyecto: "" });
+  const [errT, setErrT] = useState("");
+  const [sel, setSel] = useState(null); // id del trabajador seleccionado para el calendario
+  const [mes, setMes] = useState(today().slice(0, 7)); // YYYY-MM
+  const [antNuevo, setAntNuevo] = useState({ fecha: today(), monto: "" });
+
+  const DIAS_ESPERADOS = 16;
+
+  const crearTrabajador = async () => {
+    setErrT("");
+    if (!nuevo.nombre.trim() || !parseInt(nuevo.valor_dia, 10)) { setErrT("Nombre y valor por día son obligatorios."); return; }
+    const err = await onAddTrabajador({
+      nombre: nuevo.nombre.trim(), valor_dia: parseInt(nuevo.valor_dia, 10),
+      proyecto: nuevo.proyecto || null, activo: true,
+    });
+    if (err) { setErrT("No se pudo guardar."); return; }
+    setNuevo({ nombre: "", valor_dia: "", proyecto: "" });
+  };
+
+  // Días del mes seleccionado
+  const [anio, mesNum] = mes.split("-").map(Number);
+  const diasDelMes = new Date(anio, mesNum, 0).getDate();
+  const listaDias = Array.from({ length: diasDelMes }, (_, i) => {
+    const d = String(i + 1).padStart(2, "0");
+    return `${mes}-${d}`;
+  });
+  const nombreDiaSemana = (fechaStr) => {
+    const d = new Date(fechaStr + "T12:00:00");
+    return ["D", "L", "M", "M", "J", "V", "S"][d.getDay()];
+  };
+
+  const trabajadorSel = trabajadores.find((t) => t.id === sel);
+  const diasMarcadosSel = dias.filter((d) => d.trabajador === sel && d.fecha.startsWith(mes));
+  const nTrabajados = diasMarcadosSel.length;
+
+  // Anticipos del trabajador seleccionado
+  const antSel = anticipos.filter((a) => a.trabajador === sel);
+  const antPendientes = antSel.filter((a) => !a.descontado).reduce((s, a) => s + a.monto, 0);
+
+  const pagoBruto = trabajadorSel ? nTrabajados * trabajadorSel.valor_dia : 0;
+  const liquido = pagoBruto - antPendientes;
+
+  const crearAnticipo = async () => {
+    const monto = parseInt(antNuevo.monto, 10);
+    if (!monto || monto <= 0 || !sel) return;
+    await onAddAnticipo({ trabajador: sel, fecha: antNuevo.fecha, monto, descontado: false });
+    setAntNuevo({ fecha: today(), monto: "" });
+  };
+
+  const nombreMesTxt = (ym) => {
+    const [y, m] = ym.split("-");
+    const n = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+    return `${n[parseInt(m, 10) - 1]} ${y}`;
+  };
+  const nombreProy = (pid) => {
+    const p = proyectos.find((x) => x.id === pid);
+    return p ? p.cliente : "—";
+  };
+
+  return (
+    <div>
+      {/* Alta de trabajador */}
+      <div style={S.card}>
+        <h2 style={S.h2}>Agregar trabajador</h2>
+        <div style={S.formGrid}>
+          <Field label="Nombre">
+            <input value={nuevo.nombre} onChange={(e) => setNuevo({ ...nuevo, nombre: e.target.value })}
+              placeholder="Juan Pérez" style={S.input} />
+          </Field>
+          <Field label="Valor por día ($)">
+            <input type="number" value={nuevo.valor_dia} onChange={(e) => setNuevo({ ...nuevo, valor_dia: e.target.value })}
+              placeholder="45000" style={S.input} />
+          </Field>
+          <Field label="Proyecto (opcional)">
+            <select value={nuevo.proyecto} onChange={(e) => setNuevo({ ...nuevo, proyecto: e.target.value })} style={S.input}>
+              <option value="">Sin asignar</option>
+              {proyectos.map((p) => <option key={p.id} value={p.id}>{p.id} · {p.cliente}</option>)}
+            </select>
+          </Field>
+          <div style={{ display: "flex", alignItems: "flex-end" }}>
+            <button onClick={crearTrabajador} style={S.primaryBtn}>Agregar</button>
+          </div>
+        </div>
+        {errT && <div style={S.loginError}>{errT}</div>}
+      </div>
+
+      {/* Lista de trabajadores */}
+      <div style={S.card}>
+        <h2 style={S.h2}>Trabajadores</h2>
+        {trabajadores.length === 0 ? (
+          <div style={S.empty}>Sin trabajadores. Agrega el primero arriba.</div>
+        ) : (
+          <table style={S.table}>
+            <thead><tr>
+              <th style={S.th}>Nombre</th><th style={S.th}>Proyecto</th>
+              <th style={S.thR}>Valor día</th><th style={S.thC}></th><th style={S.thC}></th>
+            </tr></thead>
+            <tbody>
+              {trabajadores.map((t) => (
+                <tr key={t.id} style={sel === t.id ? { background: "var(--bg-success)" } : {}}>
+                  <td style={S.td}><b>{t.nombre}</b></td>
+                  <td style={{ ...S.td, color: "var(--text-secondary)" }}>{nombreProy(t.proyecto)}</td>
+                  <td style={S.tdR}>{clp(t.valor_dia)}</td>
+                  <td style={S.tdC}>
+                    <button onClick={() => setSel(t.id)} style={{ ...S.tinyBtn,
+                      background: sel === t.id ? "#1D9E75" : "var(--surface-1)",
+                      color: sel === t.id ? "#fff" : "var(--text-secondary)" }}>
+                      {sel === t.id ? "Viendo" : "Ver mes"}
+                    </button>
+                  </td>
+                  <td style={S.tdC}>
+                    <button onClick={() => { if (confirm(`¿Eliminar a ${t.nombre}? Se borran sus días y anticipos.`)) { onDelTrabajador(t.id); if (sel === t.id) setSel(null); } }}
+                      style={S.delBtn}>✕</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* Calendario y pago del trabajador seleccionado */}
+      {trabajadorSel && (
+        <>
+          <div style={S.card}>
+            <div style={S.cardHead}>
+              <h2 style={S.h2}>Días trabajados — {trabajadorSel.nombre}</h2>
+              <input type="month" value={mes} onChange={(e) => setMes(e.target.value)} style={{ ...S.input, width: "auto" }} />
+            </div>
+            <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 12px" }}>
+              Toca cada día trabajado en {nombreMesTxt(mes)}. Llevas <b>{nTrabajados}</b> de {DIAS_ESPERADOS} días esperados.
+              {nTrabajados < DIAS_ESPERADOS && <span style={{ color: "var(--text-warning)" }}> Faltan {DIAS_ESPERADOS - nTrabajados} por recuperar.</span>}
+              {nTrabajados > DIAS_ESPERADOS && <span style={{ color: "var(--text-accent)" }}> {nTrabajados - DIAS_ESPERADOS} días extra.</span>}
+            </p>
+            <div style={S.calGrid}>
+              {listaDias.map((fecha) => {
+                const marcado = diasMarcadosSel.some((d) => d.fecha === fecha);
+                const num = parseInt(fecha.slice(-2), 10);
+                return (
+                  <button key={fecha} onClick={() => onToggleDia(sel, fecha)}
+                    style={{ ...S.calDay, ...(marcado ? S.calDayOn : {}) }}>
+                    <span style={{ fontSize: 9, opacity: 0.6 }}>{nombreDiaSemana(fecha)}</span>
+                    <span>{num}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Anticipos */}
+          <div style={S.card}>
+            <h2 style={S.h2}>Anticipos — {trabajadorSel.nombre}</h2>
+            <div style={{ ...S.formGrid, marginBottom: 14 }}>
+              <Field label="Fecha">
+                <input type="date" value={antNuevo.fecha} onChange={(e) => setAntNuevo({ ...antNuevo, fecha: e.target.value })} style={S.input} />
+              </Field>
+              <Field label="Monto del adelanto">
+                <input type="number" value={antNuevo.monto} onChange={(e) => setAntNuevo({ ...antNuevo, monto: e.target.value })} placeholder="0" style={S.input} />
+              </Field>
+              <div style={{ display: "flex", alignItems: "flex-end" }}>
+                <button onClick={crearAnticipo} style={S.primaryBtn}>Registrar anticipo</button>
+              </div>
+            </div>
+            {antSel.length === 0 ? (
+              <div style={S.empty}>Sin anticipos registrados.</div>
+            ) : (
+              <table style={S.table}>
+                <thead><tr>
+                  <th style={S.th}>Fecha</th><th style={S.thR}>Monto</th><th style={S.thC}>Estado</th><th style={S.thC}></th>
+                </tr></thead>
+                <tbody>
+                  {antSel.map((a) => (
+                    <tr key={a.id}>
+                      <td style={S.td}>{a.fecha}</td>
+                      <td style={S.tdR}>{clp(a.monto)}</td>
+                      <td style={S.tdC}>
+                        <button onClick={() => onToggleAnticipo(a.id, a.descontado)} style={{ ...S.tinyBtn,
+                          background: a.descontado ? "var(--bg-success)" : "var(--bg-warning)",
+                          color: a.descontado ? "var(--text-success)" : "var(--text-warning)" }}>
+                          {a.descontado ? "Descontado" : "Pendiente"}
+                        </button>
+                      </td>
+                      <td style={S.tdC}><button onClick={() => onDelAnticipo(a.id)} style={S.delBtn}>✕</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          {/* Resumen de pago */}
+          <div style={S.card}>
+            <h2 style={S.h2}>Pago del mes — {nombreMesTxt(mes)}</h2>
+            <div style={S.pagoRow}><span>Días trabajados</span><b>{nTrabajados} × {clp(trabajadorSel.valor_dia)}</b></div>
+            <div style={S.pagoRow}><span>Pago bruto</span><b>{clp(pagoBruto)}</b></div>
+            <div style={S.pagoRow}><span>Anticipos pendientes por descontar</span><b style={{ color: "var(--text-danger)" }}>− {clp(antPendientes)}</b></div>
+            <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 10, marginTop: 4 }}>
+              <span style={{ fontWeight: 600, fontSize: 15 }}>Líquido a pagar</span>
+              <b style={{ fontSize: 20, color: "var(--text-success)" }}>{clp(liquido)}</b>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ---------- Sub-componentes ----------
 function Metric({ label, value, tone }) {
   const color = tone === "pos" ? "var(--text-success)" : tone === "neg" ? "var(--text-danger)"
@@ -979,6 +1331,10 @@ const S = {
   toggleWrap: { display: "flex", border: "0.5px solid var(--border-strong)", borderRadius: 8, overflow: "hidden" },
   toggleBtn: { border: "none", background: "var(--surface-1)", padding: "7px 14px", fontSize: 13, cursor: "pointer", color: "var(--text-secondary)" },
   toggleBtnOn: { background: "#1D9E75", color: "#fff", fontWeight: 500 },
+  calGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(44px, 1fr))", gap: 6 },
+  calDay: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: 46, borderRadius: 8, border: "0.5px solid var(--border-strong)", background: "var(--surface-1)", color: "var(--text-secondary)", fontSize: 14, cursor: "pointer", fontWeight: 500 },
+  calDayOn: { background: "#1D9E75", color: "#fff", border: "0.5px solid #1D9E75" },
+  pagoRow: { display: "flex", justifyContent: "space-between", fontSize: 14, padding: "5px 0", color: "var(--text-secondary)" },
 
   projGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16 },
   projCard: { background: "var(--surface-2)", border: "0.5px solid var(--border)", borderRadius: 12, padding: "16px 18px" },
