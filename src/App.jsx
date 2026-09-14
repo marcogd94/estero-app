@@ -1191,7 +1191,7 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
   const [sel, setSel] = useState(null); // id del trabajador seleccionado para el calendario
   const [mes, setMes] = useState(today().slice(0, 7)); // YYYY-MM
   const [antNuevo, setAntNuevo] = useState({ fecha: today(), monto: "" });
-  const [itNuevo, setItNuevo] = useState({ tipo: "haber", concepto: "", monto: "" });
+  const [itNuevo, setItNuevo] = useState({ tipo: "haber", modo: "monto", concepto: "", monto: "", porcentaje: "" });
 
   const DIAS_ESPERADOS = 16;
 
@@ -1231,16 +1231,31 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
   // Items de liquidación del trabajador y mes seleccionados
   const itemsMes = liqItems.filter((it) => it.trabajador === sel && it.mes === mes);
   const haberesExtra = itemsMes.filter((it) => it.tipo === "haber").reduce((s, it) => s + it.monto, 0);
-  const descuentos = itemsMes.filter((it) => it.tipo === "descuento").reduce((s, it) => s + it.monto, 0);
-
   const totalHaberes = sueldoBase + haberesExtra;
+
+  // El monto de un descuento: si es porcentaje, se calcula sobre el total de haberes.
+  const montoItem = (it) => {
+    if (it.es_porcentaje) return Math.round(totalHaberes * (it.porcentaje || 0) / 100);
+    return it.monto;
+  };
+  const descuentos = itemsMes.filter((it) => it.tipo === "descuento").reduce((s, it) => s + montoItem(it), 0);
+
   const liquido = totalHaberes - descuentos - antPendientes;
 
   const crearItem = async () => {
-    const monto = parseInt(itNuevo.monto, 10);
-    if (!itNuevo.concepto.trim() || !monto || monto <= 0 || !sel) return;
-    await onAddLiqItem({ trabajador: sel, mes, tipo: itNuevo.tipo, concepto: itNuevo.concepto.trim(), monto });
-    setItNuevo({ ...itNuevo, concepto: "", monto: "" });
+    if (!itNuevo.concepto.trim() || !sel) return;
+    if (itNuevo.tipo === "descuento" && itNuevo.modo === "porcentaje") {
+      const pct = parseFloat(itNuevo.porcentaje);
+      if (!pct || pct <= 0) return;
+      await onAddLiqItem({ trabajador: sel, mes, tipo: "descuento", concepto: itNuevo.concepto.trim(),
+        monto: 0, es_porcentaje: true, porcentaje: pct });
+    } else {
+      const monto = parseInt(itNuevo.monto, 10);
+      if (!monto || monto <= 0) return;
+      await onAddLiqItem({ trabajador: sel, mes, tipo: itNuevo.tipo, concepto: itNuevo.concepto.trim(),
+        monto, es_porcentaje: false, porcentaje: null });
+    }
+    setItNuevo({ tipo: itNuevo.tipo, modo: itNuevo.modo, concepto: "", monto: "", porcentaje: "" });
   };
 
   const crearAnticipo = async () => {
@@ -1402,18 +1417,35 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
             {/* Agregar concepto */}
             <div style={{ ...S.formGrid, marginBottom: 16 }}>
               <Field label="Tipo">
-                <select value={itNuevo.tipo} onChange={(e) => setItNuevo({ ...itNuevo, tipo: e.target.value })} style={S.input}>
+                <select value={itNuevo.tipo}
+                  onChange={(e) => setItNuevo({ ...itNuevo, tipo: e.target.value, modo: e.target.value === "haber" ? "monto" : itNuevo.modo })}
+                  style={S.input}>
                   <option value="haber">Haber (suma)</option>
                   <option value="descuento">Descuento (resta)</option>
                 </select>
               </Field>
               <Field label="Concepto">
                 <input value={itNuevo.concepto} onChange={(e) => setItNuevo({ ...itNuevo, concepto: e.target.value })}
-                  placeholder={itNuevo.tipo === "haber" ? "Gratificación, bono…" : "AFP, Salud 7%…"} style={S.input} />
+                  placeholder={itNuevo.tipo === "haber" ? "Gratificación, bono…" : "AFP, Salud…"} style={S.input} />
               </Field>
-              <Field label="Monto">
-                <input type="number" value={itNuevo.monto} onChange={(e) => setItNuevo({ ...itNuevo, monto: e.target.value })} placeholder="0" style={S.input} />
-              </Field>
+              {itNuevo.tipo === "descuento" && (
+                <Field label="Forma">
+                  <select value={itNuevo.modo} onChange={(e) => setItNuevo({ ...itNuevo, modo: e.target.value })} style={S.input}>
+                    <option value="monto">Monto fijo ($)</option>
+                    <option value="porcentaje">Porcentaje (%)</option>
+                  </select>
+                </Field>
+              )}
+              {itNuevo.tipo === "descuento" && itNuevo.modo === "porcentaje" ? (
+                <Field label="Porcentaje">
+                  <input type="number" value={itNuevo.porcentaje} onChange={(e) => setItNuevo({ ...itNuevo, porcentaje: e.target.value })}
+                    placeholder="7" style={S.input} />
+                </Field>
+              ) : (
+                <Field label="Monto">
+                  <input type="number" value={itNuevo.monto} onChange={(e) => setItNuevo({ ...itNuevo, monto: e.target.value })} placeholder="0" style={S.input} />
+                </Field>
+              )}
               <div style={{ display: "flex", alignItems: "flex-end" }}>
                 <button onClick={crearItem} style={S.primaryBtn}>Agregar</button>
               </div>
@@ -1438,8 +1470,11 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
             <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-danger)", margin: "16px 0 6px" }}>DESCUENTOS</div>
             {itemsMes.filter((it) => it.tipo === "descuento").map((it) => (
               <div key={it.id} style={S.pagoRow}>
-                <span>{it.concepto} <button onClick={() => onDelLiqItem(it.id)} style={S.delMini}>✕</button></span>
-                <b style={{ color: "var(--text-danger)" }}>− {clp(it.monto)}</b>
+                <span>
+                  {it.concepto}{it.es_porcentaje ? ` (${it.porcentaje}%)` : ""}
+                  <button onClick={() => onDelLiqItem(it.id)} style={S.delMini}>✕</button>
+                </span>
+                <b style={{ color: "var(--text-danger)" }}>− {clp(montoItem(it))}</b>
               </div>
             ))}
             {antPendientes > 0 && (
