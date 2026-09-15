@@ -113,12 +113,13 @@ function Panel({ onLogout, email }) {
   const [liqItems, setLiqItems] = useState([]);
   const [prestamos, setPrestamos] = useState([]);
   const [abonos, setAbonos] = useState([]);
+  const [notasMes, setNotasMes] = useState([]);
   const [filtroProy, setFiltroProy] = useState("TODOS");
   const [cargando, setCargando] = useState(true);
 
   const cargarTodo = async () => {
     setCargando(true);
-    const [p, m, f, mat, tr, di, an, li, pr, ab] = await Promise.all([
+    const [p, m, f, mat, tr, di, an, li, pr, ab, nm] = await Promise.all([
       supabase.from("proyectos").select("*").order("id"),
       supabase.from("movimientos").select("*").order("fecha", { ascending: false }),
       supabase.from("facturas").select("*").order("fecha", { ascending: false }),
@@ -129,6 +130,7 @@ function Panel({ onLogout, email }) {
       supabase.from("liquidacion_items").select("*"),
       supabase.from("prestamos").select("*").order("fecha", { ascending: false }),
       supabase.from("abonos_prestamo").select("*").order("fecha", { ascending: false }),
+      supabase.from("notas_mes").select("*"),
     ]);
     setProyectos(p.data || []);
     setMovs(m.data || []);
@@ -140,6 +142,7 @@ function Panel({ onLogout, email }) {
     setLiqItems(li.data || []);
     setPrestamos(pr.data || []);
     setAbonos(ab.data || []);
+    setNotasMes(nm.data || []);
     setCargando(false);
   };
 
@@ -296,6 +299,17 @@ function Panel({ onLogout, email }) {
     const { error } = await supabase.from("abonos_prestamo").delete().eq("id", id);
     if (!error) setAbonos((p) => p.filter((x) => x.id !== id));
   };
+  // ---- Guardar nota del mes (crear o actualizar la del trabajador+mes) ----
+  const guardarNota = async (trabajadorId, mes, texto) => {
+    const { data, error } = await supabase.from("notas_mes")
+      .upsert({ trabajador: trabajadorId, mes, texto }, { onConflict: "trabajador,mes" }).select();
+    if (!error && data) {
+      setNotasMes((p) => {
+        const resto = p.filter((n) => !(n.trabajador === trabajadorId && n.mes === mes));
+        return [...resto, ...data];
+      });
+    }
+  };
 
   // ---- Cálculos ----
   // Caja/flujo se mueve por el TOTAL (con IVA); resultado/utilidad por el NETO (sin IVA).
@@ -415,6 +429,7 @@ function Panel({ onLogout, email }) {
             {tab === "personal" && (
               <Personal trabajadores={trabajadores} proyectos={proyectos}
                 dias={dias} anticipos={anticipos} liqItems={liqItems} clp={clp}
+                notasMes={notasMes} onGuardarNota={guardarNota}
                 onAddTrabajador={addTrabajador} onDelTrabajador={delTrabajador}
                 onUpdateTrabajador={updateTrabajador}
                 onToggleDia={toggleDia} onAddAnticipo={addAnticipo}
@@ -1203,6 +1218,7 @@ function Proyectos({ resumen, onAdd, onUpdate, onDelete }) {
 
 // ---------- PERSONAL ----------
 function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
+  notasMes, onGuardarNota,
   onAddTrabajador, onDelTrabajador, onUpdateTrabajador, onToggleDia, onAddAnticipo, onToggleAnticipo, onDelAnticipo,
   onAddLiqItem, onDelLiqItem }) {
   const [nuevo, setNuevo] = useState({ nombre: "", valor_mensual: "" });
@@ -1213,6 +1229,8 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
   const [itNuevo, setItNuevo] = useState({ tipo: "haber", modo: "monto", concepto: "", monto: "", porcentaje: "" });
   const [editValId, setEditValId] = useState(null);
   const [editVal, setEditVal] = useState("");
+  const [notaTexto, setNotaTexto] = useState("");
+  const [notaGuardada, setNotaGuardada] = useState(false);
 
   const DIAS_ESPERADOS = 16;
   const DIAS_MES_BASE = 30; // el valor base es mensual por 30 días
@@ -1246,6 +1264,20 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
   };
 
   const trabajadorSel = trabajadores.find((t) => t.id === sel);
+
+  // Cargar la nota guardada cuando cambia el trabajador o el mes
+  const notaActual = notasMes.find((n) => n.trabajador === sel && n.mes === mes);
+  useEffect(() => {
+    setNotaTexto(notaActual ? notaActual.texto : "");
+    setNotaGuardada(false);
+  }, [sel, mes, notaActual?.texto]);
+
+  const guardarNotaLocal = async () => {
+    if (!sel) return;
+    await onGuardarNota(sel, mes, notaTexto);
+    setNotaGuardada(true);
+    setTimeout(() => setNotaGuardada(false), 2000);
+  };
   const diasMarcadosSel = dias.filter((d) => d.trabajador === sel && d.fecha.startsWith(mes));
   const nTrabajados = diasMarcadosSel.length;
 
@@ -1406,6 +1438,22 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
                 );
               })}
             </div>
+          </div>
+
+          {/* Notas del mes */}
+          <div style={S.card}>
+            <div style={S.cardHead}>
+              <h2 style={{ ...S.h2, margin: 0 }}>Notas del mes — {trabajadorSel.nombre}</h2>
+              <button onClick={guardarNotaLocal} style={S.primaryBtn}>
+                {notaGuardada ? "Guardado ✓" : "Guardar nota"}
+              </button>
+            </div>
+            <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 10px" }}>
+              Anota detalles de {nombreMesTxt(mes)}: licencias, días recuperados, acuerdos, observaciones.
+            </p>
+            <textarea value={notaTexto} onChange={(e) => setNotaTexto(e.target.value)}
+              placeholder="Ej: Faltó 2 días por licencia médica, se acordó recuperar el feriado…"
+              style={S.textarea} rows={4} />
           </div>
 
           {/* Anticipos */}
@@ -1780,6 +1828,7 @@ const S = {
   calDayOn: { background: "#1D9E75", color: "#fff", border: "0.5px solid #1D9E75" },
   pagoRow: { display: "flex", justifyContent: "space-between", fontSize: 14, padding: "5px 0", color: "var(--text-secondary)" },
   delMini: { border: "none", background: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 11, marginLeft: 6, padding: 0 },
+  textarea: { width: "100%", padding: "10px 12px", borderRadius: 8, border: "0.5px solid var(--border-strong)", background: "var(--surface-1)", color: "var(--text-primary)", fontSize: 14, fontFamily: "inherit", resize: "vertical", boxSizing: "border-box" },
 
   projGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16 },
   projCard: { background: "var(--surface-2)", border: "0.5px solid var(--border)", borderRadius: 12, padding: "16px 18px" },
