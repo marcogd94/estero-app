@@ -114,12 +114,14 @@ function Panel({ onLogout, email }) {
   const [prestamos, setPrestamos] = useState([]);
   const [abonos, setAbonos] = useState([]);
   const [notasMes, setNotasMes] = useState([]);
+  const [ubicaciones, setUbicaciones] = useState([]);
+  const [inventario, setInventario] = useState([]);
   const [filtroProy, setFiltroProy] = useState("TODOS");
   const [cargando, setCargando] = useState(true);
 
   const cargarTodo = async () => {
     setCargando(true);
-    const [p, m, f, mat, tr, di, an, li, pr, ab, nm] = await Promise.all([
+    const [p, m, f, mat, tr, di, an, li, pr, ab, nm, ub, inv] = await Promise.all([
       supabase.from("proyectos").select("*").order("id"),
       supabase.from("movimientos").select("*").order("fecha", { ascending: false }),
       supabase.from("facturas").select("*").order("fecha", { ascending: false }),
@@ -131,6 +133,8 @@ function Panel({ onLogout, email }) {
       supabase.from("prestamos").select("*").order("fecha", { ascending: false }),
       supabase.from("abonos_prestamo").select("*").order("fecha", { ascending: false }),
       supabase.from("notas_mes").select("*"),
+      supabase.from("ubicaciones").select("*").order("id"),
+      supabase.from("inventario").select("*").order("nombre"),
     ]);
     setProyectos(p.data || []);
     setMovs(m.data || []);
@@ -143,6 +147,8 @@ function Panel({ onLogout, email }) {
     setPrestamos(pr.data || []);
     setAbonos(ab.data || []);
     setNotasMes(nm.data || []);
+    setUbicaciones(ub.data || []);
+    setInventario(inv.data || []);
     setCargando(false);
   };
 
@@ -311,6 +317,32 @@ function Panel({ onLogout, email }) {
     }
   };
 
+  // ---- CRUD inventario y ubicaciones ----
+  const addUbicacion = async (nombre) => {
+    const { data, error } = await supabase.from("ubicaciones").insert({ nombre }).select();
+    if (!error && data) setUbicaciones((p) => [...p, ...data]);
+    return error;
+  };
+  const delUbicacion = async (id) => {
+    const { error } = await supabase.from("ubicaciones").delete().eq("id", id);
+    if (!error) {
+      setUbicaciones((p) => p.filter((x) => x.id !== id));
+      setInventario((p) => p.filter((x) => x.ubicacion !== id));
+    }
+  };
+  const addItem = async (it) => {
+    const { data, error } = await supabase.from("inventario").insert(it).select();
+    if (!error && data) setInventario((p) => [...p, ...data]);
+  };
+  const updateItemCantidad = async (id, cantidad) => {
+    const { error } = await supabase.from("inventario").update({ cantidad }).eq("id", id);
+    if (!error) setInventario((p) => p.map((x) => x.id === id ? { ...x, cantidad } : x));
+  };
+  const delItem = async (id) => {
+    const { error } = await supabase.from("inventario").delete().eq("id", id);
+    if (!error) setInventario((p) => p.filter((x) => x.id !== id));
+  };
+
   // ---- Cálculos ----
   // Caja/flujo se mueve por el TOTAL (con IVA); resultado/utilidad por el NETO (sin IVA).
   const montoCaja = (x) => (x.total != null ? x.total : x.neto);
@@ -382,6 +414,7 @@ function Panel({ onLogout, email }) {
           ["iva", "IVA (F29)"],
           ["facturacion", "Facturación"],
           ["materiales", "Materiales"],
+          ["inventario", "Inventario"],
           ["personal", "Personal"],
           ["prestamos", "Préstamos"],
           ["proyectos", "Proyectos"],
@@ -425,6 +458,11 @@ function Panel({ onLogout, email }) {
               <Materiales materiales={materiales} proyectos={proyectos}
                 filtroProy={filtroProy} setFiltroProy={setFiltroProy}
                 onAdd={addMaterial} onComprar={setComprado} onDelete={delMaterial} />
+            )}
+            {tab === "inventario" && (
+              <Inventario ubicaciones={ubicaciones} inventario={inventario}
+                onAddUbicacion={addUbicacion} onDelUbicacion={delUbicacion}
+                onAddItem={addItem} onUpdateCantidad={updateItemCantidad} onDelItem={delItem} />
             )}
             {tab === "personal" && (
               <Personal trabajadores={trabajadores} proyectos={proyectos}
@@ -1753,6 +1791,135 @@ function Prestamos({ prestamos, abonos, clp, onAddPrestamo, onDelPrestamo, onAdd
         })
       )}
     </div>
+  );
+}
+
+// ---------- INVENTARIO ----------
+function Inventario({ ubicaciones, inventario, onAddUbicacion, onDelUbicacion, onAddItem, onUpdateCantidad, onDelItem }) {
+  const [sel, setSel] = useState(null); // id de ubicación seleccionada
+  const [nuevaUb, setNuevaUb] = useState("");
+  const [mostrarNuevaUb, setMostrarNuevaUb] = useState(false);
+  const [f, setF] = useState({ nombre: "", tipo: "Material", cantidad: "" });
+
+  // Seleccionar la primera ubicación por defecto
+  const selActual = sel || (ubicaciones[0]?.id ?? null);
+
+  const crearUbicacion = async () => {
+    if (!nuevaUb.trim()) return;
+    await onAddUbicacion(nuevaUb.trim());
+    setNuevaUb("");
+    setMostrarNuevaUb(false);
+  };
+
+  const submit = async () => {
+    const cant = parseFloat(f.cantidad);
+    if (!f.nombre.trim() || !selActual || isNaN(cant)) return;
+    await onAddItem({ ubicacion: selActual, nombre: f.nombre.trim(), tipo: f.tipo, cantidad: cant });
+    setF({ nombre: "", tipo: "Material", cantidad: "" });
+  };
+
+  const lista = inventario.filter((x) => x.ubicacion === selActual);
+  const materiales = lista.filter((x) => x.tipo === "Material");
+  const herramientas = lista.filter((x) => x.tipo === "Herramienta");
+
+  return (
+    <div>
+      {/* Selector de ubicaciones */}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 20, alignItems: "center" }}>
+        {ubicaciones.map((u) => (
+          <button key={u.id} onClick={() => setSel(u.id)}
+            style={{ ...S.toggleBtn, borderRadius: 8, border: "0.5px solid var(--border-strong)",
+              ...(selActual === u.id ? S.toggleBtnOn : {}) }}>
+            {u.nombre}
+          </button>
+        ))}
+        <button onClick={() => setMostrarNuevaUb(!mostrarNuevaUb)}
+          style={{ ...S.tinyBtn, background: "var(--surface-1)", color: "var(--text-secondary)", height: 34 }}>
+          + Ubicación
+        </button>
+      </div>
+
+      {mostrarNuevaUb && (
+        <div style={{ ...S.card, display: "flex", gap: 10, alignItems: "flex-end" }}>
+          <div style={{ flex: 1 }}>
+            <div style={S.fieldLabel}>Nueva ubicación</div>
+            <input value={nuevaUb} onChange={(e) => setNuevaUb(e.target.value)}
+              placeholder="Ej: Bodega La Serena" style={S.input} />
+          </div>
+          <button onClick={crearUbicacion} style={S.primaryBtn}>Crear</button>
+        </div>
+      )}
+
+      {ubicaciones.length === 0 ? (
+        <div style={S.card}><div style={S.empty}>Sin ubicaciones. Crea la primera con "+ Ubicación".</div></div>
+      ) : (
+        <>
+          {/* Agregar ítem */}
+          <div style={S.card}>
+            <div style={S.cardHead}>
+              <h2 style={{ ...S.h2, margin: 0 }}>Agregar a {ubicaciones.find((u) => u.id === selActual)?.nombre}</h2>
+              {ubicaciones.length > 1 && (
+                <button onClick={() => { if (confirm(`¿Eliminar la ubicación y todo su inventario?`)) { onDelUbicacion(selActual); setSel(ubicaciones.find((u) => u.id !== selActual)?.id ?? null); } }}
+                  style={{ ...S.tinyBtn, background: "var(--bg-danger)", color: "var(--text-danger)" }}>Eliminar ubicación</button>
+              )}
+            </div>
+            <div style={S.formGrid}>
+              <Field label="Ítem">
+                <input value={f.nombre} onChange={(e) => setF({ ...f, nombre: e.target.value })}
+                  placeholder="Taladro, cemento, casco…" style={S.input} />
+              </Field>
+              <Field label="Tipo">
+                <select value={f.tipo} onChange={(e) => setF({ ...f, tipo: e.target.value })} style={S.input}>
+                  <option>Material</option><option>Herramienta</option>
+                </select>
+              </Field>
+              <Field label="Cantidad">
+                <input type="number" value={f.cantidad} onChange={(e) => setF({ ...f, cantidad: e.target.value })} placeholder="0" style={S.input} />
+              </Field>
+              <div style={{ display: "flex", alignItems: "flex-end" }}>
+                <button onClick={submit} style={S.primaryBtn}>Agregar</button>
+              </div>
+            </div>
+          </div>
+
+          {/* Herramientas */}
+          <div style={S.card}>
+            <h2 style={S.h2}>Herramientas ({herramientas.length})</h2>
+            <TablaInv items={herramientas} onUpdateCantidad={onUpdateCantidad} onDelItem={onDelItem} />
+          </div>
+
+          {/* Materiales */}
+          <div style={S.card}>
+            <h2 style={S.h2}>Materiales ({materiales.length})</h2>
+            <TablaInv items={materiales} onUpdateCantidad={onUpdateCantidad} onDelItem={onDelItem} />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function TablaInv({ items, onUpdateCantidad, onDelItem }) {
+  if (items.length === 0) return <div style={S.empty}>Nada aquí todavía.</div>;
+  return (
+    <table style={S.table}>
+      <thead><tr>
+        <th style={S.th}>Ítem</th><th style={S.thR}>Cantidad</th><th style={S.thC}></th>
+      </tr></thead>
+      <tbody>
+        {items.map((it) => (
+          <tr key={it.id}>
+            <td style={S.td}><b>{it.nombre}</b></td>
+            <td style={S.tdR}>
+              <input type="number" defaultValue={it.cantidad}
+                onBlur={(e) => onUpdateCantidad(it.id, parseFloat(e.target.value) || 0)}
+                style={S.miniInput} />
+            </td>
+            <td style={S.tdC}><button onClick={() => onDelItem(it.id)} style={S.delBtn}>✕</button></td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
 
