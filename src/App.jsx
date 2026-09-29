@@ -417,7 +417,10 @@ function Panel({ onLogout, email }) {
 
   const movsFiltrados = useMemo(() => {
     const l = filtroProy === "TODOS" ? movs : movs.filter((x) => x.proyecto === filtroProy);
-    return [...l].sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
+    return [...l].sort((a, b) => {
+      if (a.fecha !== b.fecha) return a.fecha < b.fecha ? 1 : -1;
+      return (b.id || 0) - (a.id || 0);
+    });
   }, [movs, filtroProy]);
 
   const appVacia = proyectos.length === 0 && movs.length === 0 && facturas.length === 0
