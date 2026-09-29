@@ -15,7 +15,7 @@ const CATEGORIAS_EGR = [
   "Combustible / Transporte", "EPP / Seguridad", "Alimentación / Viáticos",
   "Fletes", "Permisos / Certificaciones", "Mantención / Reparaciones",
   "Administración proyecto", "Arriendo oficina", "Contador", "Sueldos administrativos",
-  "Gastos bancarios", "Otros Costos Variables",
+  "Pago de impuestos (F29)", "Gastos bancarios", "Otros Costos Variables",
 ];
 const CATEGORIAS_ING = [
   "Facturación Proyectos", "Anticipos de Clientes", "Estados de Pago (EEPP)",
