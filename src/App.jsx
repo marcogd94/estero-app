@@ -1264,11 +1264,12 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
   const [sel, setSel] = useState(null); // id del trabajador seleccionado para el calendario
   const [mes, setMes] = useState(today().slice(0, 7)); // YYYY-MM
   const [antNuevo, setAntNuevo] = useState({ fecha: today(), monto: "" });
-  const [itNuevo, setItNuevo] = useState({ tipo: "haber", modo: "monto", concepto: "", monto: "", porcentaje: "" });
+  const [itNuevo, setItNuevo] = useState({ tipo: "haber", modo: "monto", concepto: "", monto: "", porcentaje: "", imponible: true });
   const [editValId, setEditValId] = useState(null);
   const [editVal, setEditVal] = useState("");
   const [notaTexto, setNotaTexto] = useState("");
   const [notaGuardada, setNotaGuardada] = useState(false);
+  const [ingresoMinimo, setIngresoMinimo] = useState(539000);
 
   const DIAS_ESPERADOS = 16;
   const DIAS_MES_BASE = 30; // el valor base es mensual por 30 días
@@ -1326,42 +1327,56 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
   // Sueldo base: valor mensual (30 días) proporcional a los días trabajados.
   const sueldoBase = trabajadorSel ? Math.round((trabajadorSel.valor_mensual / DIAS_MES_BASE) * nTrabajados) : 0;
 
+  // Gratificación legal: 25% del sueldo base, con tope mensual = ingreso mínimo × 4,75 ÷ 12.
+  const gratifSinTope = Math.round(sueldoBase * 0.25);
+  const topeGratif = Math.round(ingresoMinimo * 4.75 / 12);
+  const gratificacion = Math.min(gratifSinTope, topeGratif);
+  const gratifTopeAplicado = gratifSinTope > topeGratif;
+
   const itemsMes = liqItems.filter((it) => it.trabajador === sel && it.mes === mes);
 
-  // Haberes fijos (en monto) primero; la base + fijos forma el monto sobre el que se calculan los % de haberes.
-  const haberesFijos = itemsMes.filter((it) => it.tipo === "haber" && !it.es_porcentaje).reduce((s, it) => s + it.monto, 0);
-  const baseParaPct = sueldoBase + haberesFijos;
-  const montoHaber = (it) => it.es_porcentaje ? Math.round(baseParaPct * (it.porcentaje || 0) / 100) : it.monto;
-  const haberesExtra = itemsMes.filter((it) => it.tipo === "haber").reduce((s, it) => s + montoHaber(it), 0);
-  const totalHaberes = sueldoBase + haberesExtra;
+  // --- HABERES IMPONIBLES (sueldo base + gratificación + haberes marcados imponibles) ---
+  // Los haberes fijos imponibles primero; base imponible para calcular los % de haberes imponibles.
+  const haberesImpItems = itemsMes.filter((it) => it.tipo === "haber" && it.imponible !== false);
+  const haberesImpFijos = haberesImpItems.filter((it) => !it.es_porcentaje).reduce((s, it) => s + it.monto, 0);
+  const baseImpParaPct = sueldoBase + gratificacion + haberesImpFijos;
+  const montoHaberImp = (it) => it.es_porcentaje ? Math.round(baseImpParaPct * (it.porcentaje || 0) / 100) : it.monto;
+  const haberesImpExtra = haberesImpItems.reduce((s, it) => s + montoHaberImp(it), 0);
+  const totalImponible = sueldoBase + gratificacion + haberesImpExtra;
 
-  // Descuentos: si es porcentaje, sobre el total de haberes.
-  const montoItem = (it) => {
-    if (it.es_porcentaje) return Math.round(totalHaberes * (it.porcentaje || 0) / 100);
-    return it.monto;
-  };
+  // --- DESCUENTOS (calculados sobre el total imponible) ---
+  const montoItem = (it) => it.es_porcentaje ? Math.round(totalImponible * (it.porcentaje || 0) / 100) : it.monto;
   const descuentos = itemsMes.filter((it) => it.tipo === "descuento").reduce((s, it) => s + montoItem(it), 0);
 
-  // Líquido del mes = lo que le corresponde por el mes (sin restar anticipos).
-  // Saldo a pagar = líquido del mes menos los anticipos ya entregados.
-  const liquidoMes = totalHaberes - descuentos;
+  // --- HABERES NO IMPONIBLES (se suman después de descuentos, no pagan descuentos) ---
+  const haberesNoImpItems = itemsMes.filter((it) => it.tipo === "haber" && it.imponible === false);
+  const montoHaberNoImp = (it) => it.es_porcentaje ? Math.round(totalImponible * (it.porcentaje || 0) / 100) : it.monto;
+  const totalNoImponible = haberesNoImpItems.reduce((s, it) => s + montoHaberNoImp(it), 0);
+
+  // Líquido del mes = imponible − descuentos + no imponibles.
+  const liquidoMes = totalImponible - descuentos + totalNoImponible;
   const anticiposEntregados = antSel.reduce((s, a) => s + a.monto, 0);
   const saldoAPagar = liquidoMes - anticiposEntregados;
 
+  // Compat para el formulario (monto sobre el que se muestra un haber en %)
+  const montoHaber = (it) => (it.imponible === false ? montoHaberNoImp(it) : montoHaberImp(it));
+
   const crearItem = async () => {
     if (!itNuevo.concepto.trim() || !sel) return;
+    // El campo imponible solo aplica a haberes; los descuentos siempre van sobre lo imponible.
+    const imp = itNuevo.tipo === "haber" ? itNuevo.imponible : true;
     if (itNuevo.modo === "porcentaje") {
       const pct = parseFloat(itNuevo.porcentaje);
       if (!pct || pct <= 0) return;
       await onAddLiqItem({ trabajador: sel, mes, tipo: itNuevo.tipo, concepto: itNuevo.concepto.trim(),
-        monto: 0, es_porcentaje: true, porcentaje: pct });
+        monto: 0, es_porcentaje: true, porcentaje: pct, imponible: imp });
     } else {
       const monto = parseInt(itNuevo.monto, 10);
       if (!monto || monto <= 0) return;
       await onAddLiqItem({ trabajador: sel, mes, tipo: itNuevo.tipo, concepto: itNuevo.concepto.trim(),
-        monto, es_porcentaje: false, porcentaje: null });
+        monto, es_porcentaje: false, porcentaje: null, imponible: imp });
     }
-    setItNuevo({ tipo: itNuevo.tipo, modo: itNuevo.modo, concepto: "", monto: "", porcentaje: "" });
+    setItNuevo({ tipo: itNuevo.tipo, modo: itNuevo.modo, concepto: "", monto: "", porcentaje: "", imponible: itNuevo.imponible });
   };
 
   const crearAnticipo = async () => {
@@ -1539,9 +1554,21 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
           <div style={S.card}>
             <h2 style={S.h2}>Liquidación — {nombreMesTxt(mes)}</h2>
             <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px" }}>
-              El sueldo base es proporcional a los días trabajados (sueldo mensual ÷ 30 × días). Agrega haberes y descuentos
-              en monto fijo o porcentaje. Es una estimación para provisionar; la liquidación oficial la hace tu contador.
+              El sueldo base es proporcional a los días trabajados. La gratificación (25% con tope) se calcula sola.
+              Marca cada haber como imponible o no imponible. Es una estimación para provisionar; la oficial la hace tu contador.
             </p>
+
+            {/* Ingreso mínimo configurable (para el tope de gratificación) */}
+            <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginBottom: 16, flexWrap: "wrap" }}>
+              <div>
+                <div style={S.fieldLabel}>Ingreso mínimo vigente (para tope gratif.)</div>
+                <input type="number" value={ingresoMinimo} onChange={(e) => setIngresoMinimo(parseInt(e.target.value, 10) || 0)}
+                  style={{ ...S.input, width: 160 }} />
+              </div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", paddingBottom: 10 }}>
+                Tope gratificación: {clp(topeGratif)}/mes (IM × 4,75 ÷ 12)
+              </div>
+            </div>
 
             {/* Agregar concepto */}
             <div style={{ ...S.formGrid, marginBottom: 16 }}>
@@ -1555,7 +1582,7 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
               </Field>
               <Field label="Concepto">
                 <input value={itNuevo.concepto} onChange={(e) => setItNuevo({ ...itNuevo, concepto: e.target.value })}
-                  placeholder={itNuevo.tipo === "haber" ? "Gratificación, bono…" : "AFP, Salud…"} style={S.input} />
+                  placeholder={itNuevo.tipo === "haber" ? "Bono, colación…" : "AFP, Salud…"} style={S.input} />
               </Field>
               <Field label="Forma">
                 <select value={itNuevo.modo} onChange={(e) => setItNuevo({ ...itNuevo, modo: e.target.value })} style={S.input}>
@@ -1573,28 +1600,41 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
                   <input type="number" value={itNuevo.monto} onChange={(e) => setItNuevo({ ...itNuevo, monto: e.target.value })} placeholder="0" style={S.input} />
                 </Field>
               )}
+              {itNuevo.tipo === "haber" && (
+                <Field label="¿Imponible?">
+                  <select value={itNuevo.imponible ? "si" : "no"} onChange={(e) => setItNuevo({ ...itNuevo, imponible: e.target.value === "si" })} style={S.input}>
+                    <option value="si">Imponible</option>
+                    <option value="no">No imponible</option>
+                  </select>
+                </Field>
+              )}
               <div style={{ display: "flex", alignItems: "flex-end" }}>
                 <button onClick={crearItem} style={S.primaryBtn}>Agregar</button>
               </div>
             </div>
 
-            {/* Detalle de la liquidación */}
-            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-success)", margin: "4px 0 6px" }}>HABERES</div>
+            {/* HABERES IMPONIBLES */}
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-success)", margin: "4px 0 6px" }}>HABERES IMPONIBLES</div>
             <div style={S.pagoRow}>
               <span>Sueldo base ({nTrabajados}/{DIAS_MES_BASE} días de {clp(trabajadorSel.valor_mensual)})</span>
               <b>{clp(sueldoBase)}</b>
             </div>
-            {itemsMes.filter((it) => it.tipo === "haber").map((it) => (
+            <div style={S.pagoRow}>
+              <span>Gratificación legal (25%{gratifTopeAplicado ? ", con tope" : ""})</span>
+              <b>{clp(gratificacion)}</b>
+            </div>
+            {haberesImpItems.map((it) => (
               <div key={it.id} style={S.pagoRow}>
                 <span>{it.concepto}{it.es_porcentaje ? ` (${it.porcentaje}%)` : ""} <button onClick={() => onDelLiqItem(it.id)} style={S.delMini}>✕</button></span>
-                <b>{clp(montoHaber(it))}</b>
+                <b>{clp(montoHaberImp(it))}</b>
               </div>
             ))}
             <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 6 }}>
-              <span style={{ fontWeight: 600 }}>Total haberes</span><b>{clp(totalHaberes)}</b>
+              <span style={{ fontWeight: 600 }}>Total imponible</span><b>{clp(totalImponible)}</b>
             </div>
 
-            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-danger)", margin: "16px 0 6px" }}>DESCUENTOS</div>
+            {/* DESCUENTOS */}
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-danger)", margin: "16px 0 6px" }}>DESCUENTOS (sobre lo imponible)</div>
             {itemsMes.filter((it) => it.tipo === "descuento").map((it) => (
               <div key={it.id} style={S.pagoRow}>
                 <span>
@@ -1611,6 +1651,17 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
               <span style={{ fontWeight: 600 }}>Total descuentos</span>
               <b style={{ color: "var(--text-danger)" }}>− {clp(descuentos)}</b>
             </div>
+
+            {/* HABERES NO IMPONIBLES */}
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-accent)", margin: "16px 0 6px" }}>HABERES NO IMPONIBLES</div>
+            {haberesNoImpItems.length === 0 ? (
+              <div style={{ ...S.pagoRow, color: "var(--text-muted)" }}><span>Ninguno (ej. colación, movilización)</span><span>—</span></div>
+            ) : haberesNoImpItems.map((it) => (
+              <div key={it.id} style={S.pagoRow}>
+                <span>{it.concepto}{it.es_porcentaje ? ` (${it.porcentaje}%)` : ""} <button onClick={() => onDelLiqItem(it.id)} style={S.delMini}>✕</button></span>
+                <b style={{ color: "var(--text-accent)" }}>+ {clp(montoHaberNoImp(it))}</b>
+              </div>
+            ))}
 
             <div style={{ ...S.pagoRow, borderTop: "1.5px solid var(--border-strong)", paddingTop: 12, marginTop: 8 }}>
               <span style={{ fontWeight: 700, fontSize: 16 }}>Líquido del mes</span>
