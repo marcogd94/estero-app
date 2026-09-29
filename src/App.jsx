@@ -478,7 +478,7 @@ function Panel({ onLogout, email }) {
             {tab === "resumen" && <Resumen totales={totales} resumen={resumenProyectos} setTab={setTab} />}
             {tab === "movimientos" && (
               <Movimientos movs={movsFiltrados} proyectos={proyectos}
-                filtroProy={filtroProy} setFiltroProy={setFiltroProy}
+                filtroProy={filtroProy} setFiltroProy={setFiltroProy} efectoAbonos={efectoAbonosCaja}
                 onAdd={addMov} onTogglePagado={toggleMovPagado} onDelete={delMov} />
             )}
             {tab === "caja" && <CajaEmpresa movs={movs} clp={clp} efectoAbonos={efectoAbonosCaja} />}
@@ -569,12 +569,32 @@ function Resumen({ totales, resumen, setTab }) {
 }
 
 // ---------- MOVIMIENTOS ----------
-function Movimientos({ movs, proyectos, filtroProy, setFiltroProy, onAdd, onTogglePagado, onDelete }) {
+function Movimientos({ movs, proyectos, filtroProy, setFiltroProy, efectoAbonos = 0, onAdd, onTogglePagado, onDelete }) {
   const [f, setF] = useState({
     fecha: today(), proyecto: "", tipo: "EGR", categoria: CATEGORIAS_EGR[0],
     detalle: "", monto: "", doc: "FACTURA", incluyeIva: true, pagado: true,
   });
   const cats = f.tipo === "ING" ? CATEGORIAS_ING : CATEGORIAS_EGR;
+
+  // Saldo corrido (running balance): solo movimientos pagados, en orden cronológico.
+  // Se muestra solo con "Todos los proyectos". Incluye el efecto de abonos de préstamo como base.
+  const mostrarSaldo = filtroProy === "TODOS";
+  const saldoPorMov = useMemo(() => {
+    const mapa = {};
+    if (!mostrarSaldo) return mapa;
+    const montoCaja = (m) => (m.total != null ? m.total : m.neto);
+    // Orden cronológico ascendente (más antiguo primero), a igual fecha por id.
+    const cron = [...movs].sort((a, b) => {
+      if (a.fecha !== b.fecha) return a.fecha < b.fecha ? -1 : 1;
+      return (a.id || 0) - (b.id || 0);
+    });
+    let saldo = efectoAbonos; // parte incluyendo abonos de préstamo
+    for (const m of cron) {
+      if (m.pagado) saldo += m.tipo === "ING" ? montoCaja(m) : -montoCaja(m);
+      mapa[m.id] = saldo; // saldo después de este movimiento
+    }
+    return mapa;
+  }, [movs, mostrarSaldo, efectoAbonos]);
 
   const set = (k, v) => setF((p) => {
     const next = { ...p, [k]: v };
@@ -674,10 +694,12 @@ function Movimientos({ movs, proyectos, filtroProy, setFiltroProy, onAdd, onTogg
         <table style={S.table}>
           <thead><tr>
             <th style={S.th}>Fecha</th><th style={S.th}>Proyecto</th><th style={S.th}>Categoría</th>
-            <th style={S.th}>Detalle</th><th style={S.thR}>Neto</th><th style={S.thR}>Total (caja)</th><th style={S.thC}>Pagado</th><th style={S.thC}></th>
+            <th style={S.th}>Detalle</th><th style={S.thR}>Neto</th><th style={S.thR}>Total (caja)</th>
+            {mostrarSaldo && <th style={S.thR}>Saldo caja</th>}
+            <th style={S.thC}>Pagado</th><th style={S.thC}></th>
           </tr></thead>
           <tbody>
-            {movs.length === 0 && <tr><td colSpan={8} style={S.empty}>Aún no hay movimientos. Carga el primero arriba.</td></tr>}
+            {movs.length === 0 && <tr><td colSpan={mostrarSaldo ? 9 : 8} style={S.empty}>Aún no hay movimientos. Carga el primero arriba.</td></tr>}
             {movs.map((m) => (
               <tr key={m.id}>
                 <td style={S.td}>{m.fecha}</td>
@@ -689,6 +711,11 @@ function Movimientos({ movs, proyectos, filtroProy, setFiltroProy, onAdd, onTogg
                 <td style={{ ...S.td, color: "var(--text-secondary)" }}>{m.detalle || "—"}</td>
                 <td style={{ ...S.tdR, color: "var(--text-muted)" }}>{clp(m.neto)}</td>
                 <td style={{ ...S.tdR, fontWeight: 500 }}>{clp(m.total != null ? m.total : m.neto)}</td>
+                {mostrarSaldo && (
+                  <td style={{ ...S.tdR, color: m.pagado ? ((saldoPorMov[m.id] ?? 0) >= 0 ? "var(--text-success)" : "var(--text-danger)") : "var(--text-muted)", fontWeight: 500 }}>
+                    {m.pagado ? clp(saldoPorMov[m.id] ?? 0) : "—"}
+                  </td>
+                )}
                 <td style={S.tdC}>
                   <button onClick={() => onTogglePagado(m.id, m.pagado)} style={{ ...S.tinyBtn,
                     background: m.pagado ? "var(--bg-success)" : "var(--surface-1)",
