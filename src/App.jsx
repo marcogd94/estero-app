@@ -116,12 +116,13 @@ function Panel({ onLogout, email }) {
   const [notasMes, setNotasMes] = useState([]);
   const [ubicaciones, setUbicaciones] = useState([]);
   const [inventario, setInventario] = useState([]);
+  const [pagosSueldo, setPagosSueldo] = useState([]);
   const [filtroProy, setFiltroProy] = useState("TODOS");
   const [cargando, setCargando] = useState(true);
 
   const cargarTodo = async () => {
     setCargando(true);
-    const [p, m, f, mat, tr, di, an, li, pr, ab, nm, ub, inv] = await Promise.all([
+    const [p, m, f, mat, tr, di, an, li, pr, ab, nm, ub, inv, ps] = await Promise.all([
       supabase.from("proyectos").select("*").order("id"),
       supabase.from("movimientos").select("*").order("fecha", { ascending: false }),
       supabase.from("facturas").select("*").order("fecha", { ascending: false }),
@@ -135,6 +136,7 @@ function Panel({ onLogout, email }) {
       supabase.from("notas_mes").select("*"),
       supabase.from("ubicaciones").select("*").order("id"),
       supabase.from("inventario").select("*").order("nombre"),
+      supabase.from("pagos_sueldo").select("*").order("fecha", { ascending: false }),
     ]);
     setProyectos(p.data || []);
     setMovs(m.data || []);
@@ -149,6 +151,7 @@ function Panel({ onLogout, email }) {
     setNotasMes(nm.data || []);
     setUbicaciones(ub.data || []);
     setInventario(inv.data || []);
+    setPagosSueldo(ps.data || []);
     setCargando(false);
   };
 
@@ -343,6 +346,33 @@ function Panel({ onLogout, email }) {
     if (!error) setInventario((p) => p.filter((x) => x.id !== id));
   };
 
+  // ---- Pagar finiquito: registra el pago y descuenta de caja ----
+  const pagarFiniquito = async (trabajadorId, mes, monto, nombreTrab, fecha) => {
+    // 1) Crear el movimiento en caja (egreso, gasto general, ya pagado)
+    const mov = {
+      fecha, proyecto: null, tipo: "EGR", categoria: "Sueldos administrativos",
+      detalle: `Finiquito ${nombreTrab || ""} (${mes})`.trim(), neto: monto, total: monto,
+      doc: "BOLETA", pagado: true,
+    };
+    const { data: md, error: me } = await supabase.from("movimientos").insert(mov).select();
+    if (me) return me;
+    const movId = md?.[0]?.id ?? null;
+    if (md) setMovs((p) => [...md, ...p]);
+    // 2) Registrar el pago de finiquito
+    const { data, error } = await supabase.from("pagos_sueldo")
+      .insert({ trabajador: trabajadorId, mes, fecha, monto, movimiento_id: movId }).select();
+    if (!error && data) setPagosSueldo((p) => [...data, ...p]);
+    return error;
+  };
+  const delPagoSueldo = async (id, movimientoId) => {
+    if (movimientoId) {
+      await supabase.from("movimientos").delete().eq("id", movimientoId);
+      setMovs((p) => p.filter((x) => x.id !== movimientoId));
+    }
+    const { error } = await supabase.from("pagos_sueldo").delete().eq("id", id);
+    if (!error) setPagosSueldo((p) => p.filter((x) => x.id !== id));
+  };
+
   // ---- Cálculos ----
   // Caja/flujo se mueve por el TOTAL (con IVA); resultado/utilidad por el NETO (sin IVA).
   const montoCaja = (x) => (x.total != null ? x.total : x.neto);
@@ -468,6 +498,7 @@ function Panel({ onLogout, email }) {
               <Personal trabajadores={trabajadores} proyectos={proyectos}
                 dias={dias} anticipos={anticipos} liqItems={liqItems} clp={clp}
                 notasMes={notasMes} onGuardarNota={guardarNota}
+                pagosSueldo={pagosSueldo} onPagarFiniquito={pagarFiniquito} onDelPagoSueldo={delPagoSueldo}
                 onAddTrabajador={addTrabajador} onDelTrabajador={delTrabajador}
                 onUpdateTrabajador={updateTrabajador}
                 onToggleDia={toggleDia} onAddAnticipo={addAnticipo}
@@ -1257,6 +1288,7 @@ function Proyectos({ resumen, onAdd, onUpdate, onDelete }) {
 // ---------- PERSONAL ----------
 function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
   notasMes, onGuardarNota,
+  pagosSueldo, onPagarFiniquito, onDelPagoSueldo,
   onAddTrabajador, onDelTrabajador, onUpdateTrabajador, onToggleDia, onAddAnticipo, onToggleAnticipo, onDelAnticipo,
   onAddLiqItem, onDelLiqItem }) {
   const [nuevo, setNuevo] = useState({ nombre: "", valor_mensual: "" });
@@ -1358,6 +1390,19 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
   const liquidoMes = totalImponible - descuentos + totalNoImponible;
   const anticiposEntregados = antSel.reduce((s, a) => s + a.monto, 0);
   const saldoAPagar = liquidoMes - anticiposEntregados;
+
+  // Pagos de finiquito ya registrados para este trabajador/mes
+  const pagosDeEste = (pagosSueldo || []).filter((p) => p.trabajador === sel && p.mes === mes);
+  const yaPagado = pagosDeEste.reduce((s, p) => s + p.monto, 0);
+
+  const pagar = async () => {
+    if (!sel || saldoAPagar <= 0) return;
+    const msg = pagosDeEste.length > 0
+      ? `Ya hay un pago registrado para ${trabajadorSel.nombre} en ${nombreMesTxt(mes)}. ¿Registrar otro pago de ${clp(saldoAPagar)}?`
+      : `¿Registrar el pago de ${clp(saldoAPagar)} a ${trabajadorSel.nombre}? Se descontará de la caja.`;
+    if (!confirm(msg)) return;
+    await onPagarFiniquito(sel, mes, saldoAPagar, trabajadorSel.nombre, today());
+  };
 
   // Compat para el formulario (monto sobre el que se muestra un haber en %)
   const montoHaber = (it) => (it.imponible === false ? montoHaberNoImp(it) : montoHaberImp(it));
@@ -1671,20 +1716,42 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
             </div>
 
             {anticiposEntregados > 0 && (
-              <>
-                <div style={{ ...S.pagoRow, marginTop: 4 }}>
-                  <span>Anticipos ya entregados</span>
-                  <b style={{ color: "var(--text-danger)" }}>− {clp(anticiposEntregados)}</b>
-                </div>
-                <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 8 }}>
-                  <span style={{ fontWeight: 700, fontSize: 16, color: "var(--text-success)" }}>Saldo a pagar ahora</span>
-                  <b style={{ fontSize: 22, color: "var(--text-success)" }}>{clp(saldoAPagar)}</b>
-                </div>
-                <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "8px 0 0" }}>
-                  Los anticipos ya salieron de la caja al registrarlos. Al pagar el saldo, regístralo en caja por este monto ({clp(saldoAPagar)}) para no descontar doble.
-                </p>
-              </>
+              <div style={{ ...S.pagoRow, marginTop: 4 }}>
+                <span>Anticipos ya entregados</span>
+                <b style={{ color: "var(--text-danger)" }}>− {clp(anticiposEntregados)}</b>
+              </div>
             )}
+            <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 8 }}>
+              <span style={{ fontWeight: 700, fontSize: 16, color: "var(--text-success)" }}>Saldo a pagar</span>
+              <b style={{ fontSize: 22, color: "var(--text-success)" }}>{clp(saldoAPagar)}</b>
+            </div>
+
+            {/* Botón de pago */}
+            <div style={{ marginTop: 16 }}>
+              {pagosDeEste.length > 0 && (
+                <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 8 }}>
+                  Pagos registrados este mes:
+                  {pagosDeEste.map((p) => (
+                    <div key={p.id} style={{ ...S.pagoRow, fontSize: 13 }}>
+                      <span>{p.fecha} — {clp(p.monto)} <button onClick={() => { if (confirm("¿Anular este pago? Se revierte de la caja.")) onDelPagoSueldo(p.id, p.movimiento_id); }} style={S.delMini}>anular</button></span>
+                      <b style={{ color: "var(--text-success)" }}>Pagado ✓</b>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {saldoAPagar > 0 ? (
+                <button onClick={pagar} style={{ ...S.primaryBtn, width: "100%", height: 44 }}>
+                  Pagar {clp(saldoAPagar)} y descontar de caja
+                </button>
+              ) : (
+                <div style={{ ...S.empty, padding: "12px" }}>
+                  {liquidoMes <= 0 ? "Marca días trabajados para calcular el pago." : "Saldo cubierto por los anticipos."}
+                </div>
+              )}
+              <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "8px 0 0" }}>
+                Al pagar, se registra un egreso en la caja por el saldo (los anticipos ya se descontaron antes, así no se paga doble).
+              </p>
+            </div>
           </div>
         </>
       )}
