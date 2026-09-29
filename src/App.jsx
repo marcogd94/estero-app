@@ -1269,7 +1269,8 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
   const [editVal, setEditVal] = useState("");
   const [notaTexto, setNotaTexto] = useState("");
   const [notaGuardada, setNotaGuardada] = useState(false);
-  const [ingresoMinimo, setIngresoMinimo] = useState(539000);
+  const [ingresoMinimoTxt, setIngresoMinimoTxt] = useState("539000");
+  const ingresoMinimo = parseInt(ingresoMinimoTxt, 10) || 0;
 
   const DIAS_ESPERADOS = 16;
   const DIAS_MES_BASE = 30; // el valor base es mensual por 30 días
@@ -1562,8 +1563,9 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
             <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginBottom: 16, flexWrap: "wrap" }}>
               <div>
                 <div style={S.fieldLabel}>Ingreso mínimo vigente (para tope gratif.)</div>
-                <input type="number" value={ingresoMinimo} onChange={(e) => setIngresoMinimo(parseInt(e.target.value, 10) || 0)}
-                  style={{ ...S.input, width: 160 }} />
+                <input type="text" inputMode="numeric" value={ingresoMinimoTxt}
+                  onChange={(e) => setIngresoMinimoTxt(e.target.value.replace(/[^\d]/g, ""))}
+                  placeholder="539000" style={{ ...S.input, width: 160 }} />
               </div>
               <div style={{ fontSize: 12, color: "var(--text-muted)", paddingBottom: 10 }}>
                 Tope gratificación: {clp(topeGratif)}/mes (IM × 4,75 ÷ 12)
