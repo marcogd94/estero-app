@@ -216,6 +216,10 @@ function Panel({ onLogout, email }) {
     const { error } = await supabase.from("materiales").update({ comprado }).eq("id", id);
     if (!error) setMateriales((p) => p.map((x) => x.id === id ? { ...x, comprado } : x));
   };
+  const setPrecioMaterial = async (id, precio) => {
+    const { error } = await supabase.from("materiales").update({ precio }).eq("id", id);
+    if (!error) setMateriales((p) => p.map((x) => x.id === id ? { ...x, precio } : x));
+  };
   const delMaterial = async (id) => {
     const { error } = await supabase.from("materiales").delete().eq("id", id);
     if (!error) setMateriales((p) => p.filter((x) => x.id !== id));
@@ -490,7 +494,7 @@ function Panel({ onLogout, email }) {
             {tab === "materiales" && (
               <Materiales materiales={materiales} proyectos={proyectos}
                 filtroProy={filtroProy} setFiltroProy={setFiltroProy}
-                onAdd={addMaterial} onComprar={setComprado} onDelete={delMaterial} />
+                onAdd={addMaterial} onComprar={setComprado} onPrecio={setPrecioMaterial} onDelete={delMaterial} />
             )}
             {tab === "inventario" && (
               <Inventario ubicaciones={ubicaciones} inventario={inventario}
@@ -1082,21 +1086,22 @@ function Facturacion({ facturas, proyectos, onAdd, onEstado, onDelete }) {
 }
 
 // ---------- MATERIALES ----------
-function Materiales({ materiales, proyectos, filtroProy, setFiltroProy, onAdd, onComprar, onDelete }) {
-  const [f, setF] = useState({ proyecto: "", material: "", unidad: "un", requerido: "", comprado: "" });
+function Materiales({ materiales, proyectos, filtroProy, setFiltroProy, onAdd, onComprar, onPrecio, onDelete }) {
+  const [f, setF] = useState({ proyecto: "", material: "", unidad: "un", requerido: "", comprado: "", precio: "" });
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
 
   const submit = () => {
     const req = parseFloat(f.requerido);
     if (!f.material.trim() || !req || req <= 0 || !f.proyecto) return;
     onAdd({ proyecto: f.proyecto, material: f.material.trim(), unidad: f.unidad,
-      requerido: req, comprado: parseFloat(f.comprado) || 0 });
-    setF({ ...f, material: "", requerido: "", comprado: "" });
+      requerido: req, comprado: parseFloat(f.comprado) || 0, precio: parseInt(f.precio, 10) || 0 });
+    setF({ ...f, material: "", requerido: "", comprado: "", precio: "" });
   };
 
   const lista = filtroProy === "TODOS" ? materiales : materiales.filter((x) => x.proyecto === filtroProy);
   const completos = lista.filter((x) => x.comprado >= x.requerido).length;
   const pendientes = lista.length - completos;
+  const totalPrecio = lista.reduce((s, x) => s + (x.precio || 0), 0);
 
   return (
     <div>
@@ -1104,6 +1109,7 @@ function Materiales({ materiales, proyectos, filtroProy, setFiltroProy, onAdd, o
         <Metric label="Materiales en lista" value={lista.length} />
         <Metric label="Completos" value={completos} tone="pos" />
         <Metric label="Por comprar" value={pendientes} tone={pendientes > 0 ? "accent" : "pos"} />
+        <Metric label={filtroProy === "TODOS" ? "Costo total materiales" : "Costo materiales proyecto"} value={clp(totalPrecio)} tone="accent" />
       </div>
       <div style={S.card}>
         <h2 style={S.h2}>Agregar material</h2>
@@ -1129,6 +1135,9 @@ function Materiales({ materiales, proyectos, filtroProy, setFiltroProy, onAdd, o
           <Field label="Ya comprado (opcional)">
             <input type="number" value={f.comprado} onChange={(e) => set("comprado", e.target.value)} placeholder="0" style={S.input} />
           </Field>
+          <Field label="Precio total ($)">
+            <input type="number" value={f.precio} onChange={(e) => set("precio", e.target.value)} placeholder="0" style={S.input} />
+          </Field>
           <div style={{ display: "flex", alignItems: "flex-end" }}>
             <button onClick={submit} style={S.primaryBtn}>Agregar</button>
           </div>
@@ -1145,10 +1154,10 @@ function Materiales({ materiales, proyectos, filtroProy, setFiltroProy, onAdd, o
         <table style={S.table}>
           <thead><tr>
             <th style={S.th}>Proyecto</th><th style={S.th}>Material</th><th style={S.thR}>Requerido</th>
-            <th style={S.thR}>Comprado</th><th style={S.thR}>Falta</th><th style={S.thC}>Avance</th><th style={S.thC}></th>
+            <th style={S.thR}>Comprado</th><th style={S.thR}>Falta</th><th style={S.thR}>Precio</th><th style={S.thC}>Avance</th><th style={S.thC}></th>
           </tr></thead>
           <tbody>
-            {lista.length === 0 && <tr><td colSpan={7} style={S.empty}>Sin materiales. Agrega el primero arriba.</td></tr>}
+            {lista.length === 0 && <tr><td colSpan={8} style={S.empty}>Sin materiales. Agrega el primero arriba.</td></tr>}
             {lista.map((m) => {
               const falta = Math.max(0, m.requerido - m.comprado);
               const pct = m.requerido > 0 ? Math.min(100, Math.round((m.comprado / m.requerido) * 100)) : 0;
@@ -1164,6 +1173,10 @@ function Materiales({ materiales, proyectos, filtroProy, setFiltroProy, onAdd, o
                   </td>
                   <td style={{ ...S.tdR, color: completo ? "var(--text-success)" : "var(--text-warning)", fontWeight: 500 }}>
                     {completo ? "—" : `${falta} ${m.unidad}`}
+                  </td>
+                  <td style={S.tdR}>
+                    <input type="number" defaultValue={m.precio || 0}
+                      onBlur={(e) => onPrecio(m.id, parseInt(e.target.value, 10) || 0)} style={S.miniInput} />
                   </td>
                   <td style={S.tdC}>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, justifyContent: "center" }}>
