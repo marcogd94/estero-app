@@ -448,6 +448,7 @@ function Panel({ onLogout, email }) {
           ["resumen", "Resumen"],
           ["movimientos", "Movimientos"],
           ["caja", "Caja empresa"],
+          ["analisis", "Análisis"],
           ["iva", "IVA (F29)"],
           ["facturacion", "Facturación"],
           ["materiales", "Materiales"],
@@ -486,6 +487,7 @@ function Panel({ onLogout, email }) {
                 onAdd={addMov} onTogglePagado={toggleMovPagado} onDelete={delMov} />
             )}
             {tab === "caja" && <CajaEmpresa movs={movs} clp={clp} efectoAbonos={efectoAbonosCaja} />}
+            {tab === "analisis" && <Analisis movs={movs} proyectos={proyectos} clp={clp} />}
             {tab === "iva" && <IvaMensual movs={movs} facturas={facturas} clp={clp} />}
             {tab === "facturacion" && (
               <Facturacion facturas={facturas} proyectos={proyectos}
@@ -810,6 +812,165 @@ function IvaMensual({ movs, facturas, clp }) {
                   <td style={{ ...S.tdR, fontWeight: 600, color: aFavor ? "var(--text-accent)" : "var(--text-primary)" }}>
                     {aFavor ? `${clp(Math.abs(r.aPagar))} a favor` : `${clp(r.aPagar)} a pagar`}
                   </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ---------- ANÁLISIS DE GASTOS ----------
+function Analisis({ movs, proyectos, clp }) {
+  const montoCaja = (m) => (m.total != null ? m.total : m.neto);
+  const nombreMes = (ym) => {
+    const [y, m] = ym.split("-");
+    const n = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+    return `${n[parseInt(m, 10) - 1]} ${y}`;
+  };
+  const COLORES = ["#1D9E75", "#E24B4A", "#534AB7", "#EF9F27", "#185fa5", "#0f6e56",
+    "#a32d2d", "#854f0b", "#7b5ea7", "#2c8c6f", "#c0603a", "#4a6fa5", "#9c9a92"];
+
+  // Solo egresos. Monto total con IVA (lo que salió de caja).
+  const egresos = movs.filter((m) => m.tipo === "EGR");
+
+  // --- Totales por categoría ---
+  const porCat = {};
+  egresos.forEach((m) => { porCat[m.categoria] = (porCat[m.categoria] || 0) + montoCaja(m); });
+  const catOrden = Object.entries(porCat).sort((a, b) => b[1] - a[1]);
+  const totalGastos = catOrden.reduce((s, [, v]) => s + v, 0);
+
+  // --- Totales por proyecto ---
+  const porProy = {};
+  egresos.forEach((m) => {
+    const key = m.proyecto || "General";
+    porProy[key] = (porProy[key] || 0) + montoCaja(m);
+  });
+  const nombreProy = (pid) => {
+    if (pid === "General") return "Gasto general";
+    const p = proyectos.find((x) => x.id === pid);
+    return p ? `${p.id} · ${p.cliente}` : pid;
+  };
+  const proyOrden = Object.entries(porProy).sort((a, b) => b[1] - a[1]);
+
+  // --- Gasto mensual (histórico) ---
+  const porMes = {};
+  egresos.forEach((m) => {
+    const mes = (m.fecha || "").slice(0, 7);
+    if (!mes) return;
+    porMes[mes] = (porMes[mes] || 0) + montoCaja(m);
+  });
+  const mesesOrden = Object.keys(porMes).sort();
+  const dataMensual = mesesOrden.map((mes) => ({ mes: nombreMes(mes), Gasto: porMes[mes] }));
+
+  // --- Proyección: promedio de los meses con datos ---
+  const nMeses = mesesOrden.length;
+  const promedioMensual = nMeses > 0 ? Math.round(totalGastos / nMeses) : 0;
+
+  // Proyección de los próximos 3 meses a partir del último mes con datos
+  const proyeccion = [];
+  if (nMeses > 0) {
+    const [ulY, ulM] = mesesOrden[mesesOrden.length - 1].split("-").map(Number);
+    let y = ulY, mo = ulM;
+    for (let i = 0; i < 3; i++) {
+      mo++; if (mo > 12) { mo = 1; y++; }
+      const ym = `${y}-${String(mo).padStart(2, "0")}`;
+      proyeccion.push({ mes: nombreMes(ym), Proyectado: promedioMensual });
+    }
+  }
+  // Datos combinados para el gráfico: histórico (Gasto) + proyección (Proyectado)
+  const dataProy = [
+    ...dataMensual.map((d) => ({ mes: d.mes, Gasto: d.Gasto })),
+    ...proyeccion.map((d) => ({ mes: d.mes, Proyectado: d.Proyectado })),
+  ];
+
+  const miles = (v) => "$" + Math.round(v / 1000).toLocaleString("es-CL") + "k";
+
+  if (egresos.length === 0) {
+    return <div style={S.card}><div style={S.empty}>Aún no hay egresos para analizar. Carga gastos en Movimientos.</div></div>;
+  }
+
+  return (
+    <div>
+      <div style={S.metricGrid}>
+        <Metric label="Gasto total acumulado" value={clp(totalGastos)} tone="neg" />
+        <Metric label="Promedio mensual" value={clp(promedioMensual)} tone="accent" />
+        <Metric label="Meses con datos" value={nMeses} />
+        <Metric label="Proyección próx. mes" value={clp(promedioMensual)} tone="accent" />
+      </div>
+
+      {/* Gasto mensual + proyección */}
+      <div style={S.card}>
+        <h2 style={S.h2}>Gasto mensual y proyección</h2>
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 12px" }}>
+          Barras sólidas: gasto real por mes. Barras claras: proyección (promedio de {nMeses} {nMeses === 1 ? "mes" : "meses"} con datos).
+        </p>
+        <ResponsiveContainer width="100%" height={240}>
+          <BarChart data={dataProy} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+            <XAxis dataKey="mes" tick={{ fontSize: 11, fill: "var(--text-secondary)" }} />
+            <YAxis tickFormatter={miles} tick={{ fontSize: 11, fill: "var(--text-muted)" }} width={54} />
+            <Tooltip formatter={(v) => clp(v)} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            <Bar dataKey="Gasto" fill="#E24B4A" radius={[3, 3, 0, 0]} />
+            <Bar dataKey="Proyectado" fill="#f0a9a8" radius={[3, 3, 0, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* Desglose por categoría */}
+      <div style={S.card}>
+        <h2 style={S.h2}>En qué se gasta (por categoría)</h2>
+        <table style={S.table}>
+          <thead><tr>
+            <th style={S.th}>Categoría</th><th style={S.thR}>Total</th><th style={S.thR}>%</th><th style={S.th}></th>
+          </tr></thead>
+          <tbody>
+            {catOrden.map(([cat, monto], i) => {
+              const pct = totalGastos > 0 ? Math.round((monto / totalGastos) * 100) : 0;
+              return (
+                <tr key={cat}>
+                  <td style={S.td}>
+                    <span style={{ display: "inline-block", width: 10, height: 10, borderRadius: 2, background: COLORES[i % COLORES.length], marginRight: 8 }} />
+                    {cat}
+                  </td>
+                  <td style={S.tdR}>{clp(monto)}</td>
+                  <td style={{ ...S.tdR, color: "var(--text-secondary)" }}>{pct}%</td>
+                  <td style={{ ...S.td, width: "35%" }}>
+                    <div style={{ ...S.barTrack, height: 8 }}>
+                      <div style={{ height: "100%", borderRadius: 4, width: pct + "%", background: COLORES[i % COLORES.length] }} />
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+            <tr>
+              <td style={{ ...S.td, fontWeight: 600, borderTop: "1.5px solid var(--border-strong)" }}>Total</td>
+              <td style={{ ...S.tdR, fontWeight: 600, borderTop: "1.5px solid var(--border-strong)" }}>{clp(totalGastos)}</td>
+              <td style={{ borderTop: "1.5px solid var(--border-strong)" }}></td>
+              <td style={{ borderTop: "1.5px solid var(--border-strong)" }}></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      {/* Desglose por proyecto */}
+      <div style={S.card}>
+        <h2 style={S.h2}>Gasto por proyecto</h2>
+        <table style={S.table}>
+          <thead><tr>
+            <th style={S.th}>Proyecto</th><th style={S.thR}>Total gastado</th><th style={S.thR}>%</th>
+          </tr></thead>
+          <tbody>
+            {proyOrden.map(([pid, monto]) => {
+              const pct = totalGastos > 0 ? Math.round((monto / totalGastos) * 100) : 0;
+              return (
+                <tr key={pid}>
+                  <td style={S.td}>{nombreProy(pid)}</td>
+                  <td style={S.tdR}>{clp(monto)}</td>
+                  <td style={{ ...S.tdR, color: "var(--text-secondary)" }}>{pct}%</td>
                 </tr>
               );
             })}
