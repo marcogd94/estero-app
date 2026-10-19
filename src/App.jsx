@@ -117,12 +117,13 @@ function Panel({ onLogout, email }) {
   const [ubicaciones, setUbicaciones] = useState([]);
   const [inventario, setInventario] = useState([]);
   const [pagosSueldo, setPagosSueldo] = useState([]);
+  const [reembolsos, setReembolsos] = useState([]);
   const [filtroProy, setFiltroProy] = useState("TODOS");
   const [cargando, setCargando] = useState(true);
 
   const cargarTodo = async () => {
     setCargando(true);
-    const [p, m, f, mat, tr, di, an, li, pr, ab, nm, ub, inv, ps] = await Promise.all([
+    const [p, m, f, mat, tr, di, an, li, pr, ab, nm, ub, inv, ps, re] = await Promise.all([
       supabase.from("proyectos").select("*").order("id"),
       supabase.from("movimientos").select("*").order("fecha", { ascending: false }),
       supabase.from("facturas").select("*").order("fecha", { ascending: false }),
@@ -137,6 +138,7 @@ function Panel({ onLogout, email }) {
       supabase.from("ubicaciones").select("*").order("id"),
       supabase.from("inventario").select("*").order("nombre"),
       supabase.from("pagos_sueldo").select("*").order("fecha", { ascending: false }),
+      supabase.from("reembolsos").select("*").order("fecha", { ascending: false }),
     ]);
     setProyectos(p.data || []);
     setMovs(m.data || []);
@@ -152,6 +154,7 @@ function Panel({ onLogout, email }) {
     setUbicaciones(ub.data || []);
     setInventario(inv.data || []);
     setPagosSueldo(ps.data || []);
+    setReembolsos(re.data || []);
     setCargando(false);
   };
 
@@ -377,9 +380,38 @@ function Panel({ onLogout, email }) {
     if (!error) setPagosSueldo((p) => p.filter((x) => x.id !== id));
   };
 
+  // ---- Reembolsos a dueños: registra devolución y descuenta de caja ----
+  const registrarReembolso = async (persona, monto, fecha) => {
+    // 1) Movimiento en caja (egreso, ya pagado, categoría propia)
+    const mov = {
+      fecha, proyecto: null, tipo: "EGR", categoria: "Reembolso a dueño",
+      detalle: `Devolución a ${persona}`, neto: monto, total: monto,
+      doc: "BOLETA", pagado: true, pagado_por: "Empresa",
+    };
+    const { data: md, error: me } = await supabase.from("movimientos").insert(mov).select();
+    if (me) return me;
+    const movId = md?.[0]?.id ?? null;
+    if (md) setMovs((p) => [...md, ...p]);
+    // 2) Registrar el reembolso
+    const { data, error } = await supabase.from("reembolsos")
+      .insert({ persona, fecha, monto, movimiento_id: movId }).select();
+    if (!error && data) setReembolsos((p) => [...data, ...p]);
+    return error;
+  };
+  const delReembolso = async (id, movimientoId) => {
+    if (movimientoId) {
+      await supabase.from("movimientos").delete().eq("id", movimientoId);
+      setMovs((p) => p.filter((x) => x.id !== movimientoId));
+    }
+    const { error } = await supabase.from("reembolsos").delete().eq("id", id);
+    if (!error) setReembolsos((p) => p.filter((x) => x.id !== id));
+  };
+
   // ---- Cálculos ----
   // Caja/flujo se mueve por el TOTAL (con IVA); resultado/utilidad por el NETO (sin IVA).
   const montoCaja = (x) => (x.total != null ? x.total : x.neto);
+  // Un gasto pagado por un dueño (Marco/Diego) NO mueve la caja de la empresa.
+  const tocaCaja = (x) => (x.pagado_por || "Empresa") === "Empresa";
 
   const resumenProyectos = useMemo(() => {
     return proyectos.map((p) => {
@@ -387,11 +419,14 @@ function Panel({ onLogout, email }) {
       const ing = m.filter((x) => x.tipo === "ING").reduce((s, x) => s + x.neto, 0);
       const egr = m.filter((x) => x.tipo === "EGR").reduce((s, x) => s + x.neto, 0);
       const cajaIn = m.filter((x) => x.tipo === "ING" && x.pagado).reduce((s, x) => s + montoCaja(x), 0);
-      const cajaOut = m.filter((x) => x.tipo === "EGR" && x.pagado).reduce((s, x) => s + montoCaja(x), 0);
+      const cajaOut = m.filter((x) => x.tipo === "EGR" && x.pagado && tocaCaja(x)).reduce((s, x) => s + montoCaja(x), 0);
       return { ...p, ingresos: ing, egresos: egr, resultado: ing - egr,
         caja: cajaIn - cajaOut, porFacturar: (p.presupuesto || 0) - ing };
     });
   }, [proyectos, movs]);
+
+  // Efecto de los reembolsos a dueños en la caja: cada devolución sale de caja (−).
+  const efectoReembolsos = useMemo(() => reembolsos.reduce((s, r) => s - r.monto, 0), [reembolsos]);
 
   // Efecto de los abonos de préstamos en la caja:
   //  - abono a "por_pagar" = pago de deuda = sale de caja (−)
@@ -413,11 +448,11 @@ function Panel({ onLogout, email }) {
     const ing = movs.filter((x) => x.tipo === "ING").reduce((s, x) => s + x.neto, 0);
     const egr = movs.filter((x) => x.tipo === "EGR").reduce((s, x) => s + x.neto, 0);
     const cajaIn = movs.filter((x) => x.tipo === "ING" && x.pagado).reduce((s, x) => s + montoCaja(x), 0);
-    const cajaOut = movs.filter((x) => x.tipo === "EGR" && x.pagado).reduce((s, x) => s + montoCaja(x), 0);
+    const cajaOut = movs.filter((x) => x.tipo === "EGR" && x.pagado && tocaCaja(x)).reduce((s, x) => s + montoCaja(x), 0);
     const porCobrar = facturas.filter((f) => f.estado !== "Pagada")
       .reduce((s, f) => s + f.neto * (f.exento ? 1 : 1 + IVA_RATE), 0);
-    return { ing, egr, resultado: ing - egr, caja: cajaIn - cajaOut + efectoAbonosCaja, porCobrar };
-  }, [movs, facturas, efectoAbonosCaja]);
+    return { ing, egr, resultado: ing - egr, caja: cajaIn - cajaOut + efectoAbonosCaja + efectoReembolsos, porCobrar };
+  }, [movs, facturas, efectoAbonosCaja, efectoReembolsos]);
 
   const movsFiltrados = useMemo(() => {
     const l = filtroProy === "TODOS" ? movs : movs.filter((x) => x.proyecto === filtroProy);
@@ -455,6 +490,7 @@ function Panel({ onLogout, email }) {
           ["inventario", "Inventario"],
           ["personal", "Personal"],
           ["prestamos", "Préstamos"],
+          ["reembolsos", "Reembolsos"],
           ["proyectos", "Proyectos"],
         ].map(([k, label]) => (
           <button key={k} onClick={() => setTab(k)}
@@ -486,7 +522,7 @@ function Panel({ onLogout, email }) {
                 filtroProy={filtroProy} setFiltroProy={setFiltroProy} efectoAbonos={efectoAbonosCaja}
                 onAdd={addMov} onTogglePagado={toggleMovPagado} onDelete={delMov} />
             )}
-            {tab === "caja" && <CajaEmpresa movs={movs} clp={clp} efectoAbonos={efectoAbonosCaja} />}
+            {tab === "caja" && <CajaEmpresa movs={movs} clp={clp} efectoAbonos={efectoAbonosCaja + efectoReembolsos} />}
             {tab === "analisis" && <Analisis movs={movs} proyectos={proyectos} clp={clp} />}
             {tab === "iva" && <IvaMensual movs={movs} facturas={facturas} clp={clp} />}
             {tab === "facturacion" && (
@@ -518,6 +554,10 @@ function Panel({ onLogout, email }) {
               <Prestamos prestamos={prestamos} abonos={abonos} clp={clp}
                 onAddPrestamo={addPrestamo} onDelPrestamo={delPrestamo}
                 onAddAbono={addAbono} onDelAbono={delAbono} />
+            )}
+            {tab === "reembolsos" && (
+              <Reembolsos movs={movs} reembolsos={reembolsos} clp={clp}
+                onRegistrar={registrarReembolso} onDelReembolso={delReembolso} />
             )}
             {tab === "proyectos" && (
               <Proyectos resumen={resumenProyectos} onAdd={addProyecto}
@@ -578,25 +618,27 @@ function Resumen({ totales, resumen, setTab }) {
 function Movimientos({ movs, proyectos, filtroProy, setFiltroProy, efectoAbonos = 0, onAdd, onTogglePagado, onDelete }) {
   const [f, setF] = useState({
     fecha: today(), proyecto: "", tipo: "EGR", categoria: CATEGORIAS_EGR[0],
-    detalle: "", monto: "", doc: "FACTURA", incluyeIva: true, pagado: true,
+    detalle: "", monto: "", doc: "FACTURA", incluyeIva: true, pagado: true, pagado_por: "Empresa",
   });
   const cats = f.tipo === "ING" ? CATEGORIAS_ING : CATEGORIAS_EGR;
 
-  // Saldo corrido (running balance): solo movimientos pagados, en orden cronológico.
+  // Un gasto pagado por un dueño NO mueve la caja de la empresa (él puso la plata).
+  const tocaCaja = (m) => (m.pagado_por || "Empresa") === "Empresa";
+
+  // Saldo corrido (running balance): solo movimientos pagados que tocan caja, en orden cronológico.
   // Se muestra solo con "Todos los proyectos". Incluye el efecto de abonos de préstamo como base.
   const mostrarSaldo = filtroProy === "TODOS";
   const saldoPorMov = useMemo(() => {
     const mapa = {};
     if (!mostrarSaldo) return mapa;
     const montoCaja = (m) => (m.total != null ? m.total : m.neto);
-    // Orden cronológico ascendente (más antiguo primero), a igual fecha por id.
     const cron = [...movs].sort((a, b) => {
       if (a.fecha !== b.fecha) return a.fecha < b.fecha ? -1 : 1;
       return (a.id || 0) - (b.id || 0);
     });
     let saldo = efectoAbonos; // parte incluyendo abonos de préstamo
     for (const m of cron) {
-      if (m.pagado) saldo += m.tipo === "ING" ? montoCaja(m) : -montoCaja(m);
+      if (m.pagado && tocaCaja(m)) saldo += m.tipo === "ING" ? montoCaja(m) : -montoCaja(m);
       mapa[m.id] = saldo; // saldo después de este movimiento
     }
     return mapa;
@@ -618,6 +660,7 @@ function Movimientos({ movs, proyectos, filtroProy, setFiltroProy, efectoAbonos 
     onAdd({
       fecha: f.fecha, proyecto: f.proyecto || null, tipo: f.tipo, categoria: f.categoria,
       detalle: f.detalle, neto, total, doc: f.doc, pagado: f.pagado,
+      pagado_por: f.tipo === "EGR" ? f.pagado_por : "Empresa",
     });
     setF({ ...f, detalle: "", monto: "" });
   };
@@ -659,6 +702,15 @@ function Movimientos({ movs, proyectos, filtroProy, setFiltroProy, efectoAbonos 
               <option>FACTURA</option><option>BOLETA</option>
             </select>
           </Field>
+          {f.tipo === "EGR" && (
+            <Field label="Quién pagó">
+              <select value={f.pagado_por} onChange={(e) => set("pagado_por", e.target.value)} style={S.input}>
+                <option value="Empresa">Empresa</option>
+                <option value="Marco">Marco (reembolsar)</option>
+                <option value="Diego">Diego (reembolsar)</option>
+              </select>
+            </Field>
+          )}
           <Field label={f.incluyeIva ? "Monto (con IVA)" : "Monto (neto)"}>
             <input type="number" value={f.monto} onChange={(e) => set("monto", e.target.value)}
               placeholder="0" style={S.input} />
@@ -714,7 +766,14 @@ function Movimientos({ movs, proyectos, filtroProy, setFiltroProy, efectoAbonos 
                   <span style={{ ...S.pill, background: m.tipo === "ING" ? "var(--bg-success)" : "var(--bg-danger)",
                     color: m.tipo === "ING" ? "var(--text-success)" : "var(--text-danger)" }}>{m.tipo}</span>{" "}{m.categoria}
                 </td>
-                <td style={{ ...S.td, color: "var(--text-secondary)" }}>{m.detalle || "—"}</td>
+                <td style={{ ...S.td, color: "var(--text-secondary)" }}>
+                  {m.detalle || "—"}
+                  {m.pagado_por && m.pagado_por !== "Empresa" && (
+                    <span style={{ ...S.pill, marginLeft: 6, marginRight: 0, background: "var(--bg-accent)", color: "var(--text-accent)" }}>
+                      pagó {m.pagado_por}
+                    </span>
+                  )}
+                </td>
                 <td style={{ ...S.tdR, color: "var(--text-muted)" }}>{clp(m.neto)}</td>
                 <td style={{ ...S.tdR, fontWeight: 500 }}>{clp(m.total != null ? m.total : m.neto)}</td>
                 {mostrarSaldo && (
@@ -817,6 +876,124 @@ function IvaMensual({ movs, facturas, clp }) {
             })}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+// ---------- REEMBOLSOS A DUEÑOS ----------
+function Reembolsos({ movs, reembolsos, clp, onRegistrar, onDelReembolso }) {
+  const [devol, setDevol] = useState({ persona: "Marco", monto: "", fecha: today() });
+  const montoCaja = (m) => (m.total != null ? m.total : m.neto);
+
+  // Por persona: total gastado de su bolsillo − total ya devuelto = saldo que se le debe
+  const resumenPersona = (persona) => {
+    const gastos = movs.filter((m) => m.tipo === "EGR" && m.pagado_por === persona);
+    const totalGastado = gastos.reduce((s, m) => s + montoCaja(m), 0);
+    const totalDevuelto = reembolsos.filter((r) => r.persona === persona).reduce((s, r) => s + r.monto, 0);
+    return { gastos, totalGastado, totalDevuelto, saldo: totalGastado - totalDevuelto };
+  };
+  const marco = resumenPersona("Marco");
+  const diego = resumenPersona("Diego");
+
+  const registrar = async () => {
+    const monto = parseInt(devol.monto, 10);
+    if (!monto || monto <= 0) return;
+    await onRegistrar(devol.persona, monto, devol.fecha);
+    setDevol({ ...devol, monto: "" });
+  };
+
+  const BloquePersona = ({ nombre, data }) => (
+    <div style={S.card}>
+      <div style={S.cardHead}>
+        <h2 style={{ ...S.h2, margin: 0 }}>{nombre}</h2>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>Se le debe</div>
+          <div style={{ fontSize: 20, fontWeight: 600, color: data.saldo > 0 ? "var(--text-danger)" : "var(--text-success)" }}>
+            {data.saldo > 0 ? clp(data.saldo) : "Al día ✓"}
+          </div>
+        </div>
+      </div>
+      <div style={S.pagoRow}><span>Total pagado de su bolsillo</span><b>{clp(data.totalGastado)}</b></div>
+      <div style={S.pagoRow}><span>Total ya devuelto</span><b style={{ color: "var(--text-success)" }}>{clp(data.totalDevuelto)}</b></div>
+      {data.gastos.length > 0 && (
+        <table style={{ ...S.table, marginTop: 10 }}>
+          <thead><tr>
+            <th style={S.th}>Fecha</th><th style={S.th}>Categoría</th><th style={S.th}>Detalle</th><th style={S.thR}>Monto</th>
+          </tr></thead>
+          <tbody>
+            {[...data.gastos].sort((a, b) => (a.fecha < b.fecha ? 1 : -1)).map((m) => (
+              <tr key={m.id}>
+                <td style={S.td}>{m.fecha}</td>
+                <td style={S.td}>{m.categoria}</td>
+                <td style={{ ...S.td, color: "var(--text-secondary)" }}>{m.detalle || "—"}</td>
+                <td style={S.tdR}>{clp(montoCaja(m))}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+
+  return (
+    <div>
+      <div style={S.metricGrid}>
+        <Metric label="Se le debe a Marco" value={clp(marco.saldo)} tone={marco.saldo > 0 ? "neg" : "pos"} />
+        <Metric label="Se le debe a Diego" value={clp(diego.saldo)} tone={diego.saldo > 0 ? "neg" : "pos"} />
+        <Metric label="Total por reembolsar" value={clp(marco.saldo + diego.saldo)} tone="neg" />
+      </div>
+
+      <div style={S.card}>
+        <h2 style={S.h2}>Registrar devolución</h2>
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 12px" }}>
+          Cuando le devuelves plata a un dueño, se registra aquí y sale de la caja. Puedes devolver de a poco.
+        </p>
+        <div style={S.formGrid}>
+          <Field label="Persona">
+            <select value={devol.persona} onChange={(e) => setDevol({ ...devol, persona: e.target.value })} style={S.input}>
+              <option>Marco</option><option>Diego</option>
+            </select>
+          </Field>
+          <Field label="Monto a devolver">
+            <input type="number" value={devol.monto} onChange={(e) => setDevol({ ...devol, monto: e.target.value })} placeholder="0" style={S.input} />
+          </Field>
+          <Field label="Fecha">
+            <input type="date" value={devol.fecha} onChange={(e) => setDevol({ ...devol, fecha: e.target.value })} style={S.input} />
+          </Field>
+          <div style={{ display: "flex", alignItems: "flex-end" }}>
+            <button onClick={registrar} style={S.primaryBtn}>Registrar devolución</button>
+          </div>
+        </div>
+      </div>
+
+      <BloquePersona nombre="Marco" data={marco} />
+      <BloquePersona nombre="Diego" data={diego} />
+
+      {/* Historial de devoluciones */}
+      <div style={S.card}>
+        <h2 style={S.h2}>Devoluciones registradas</h2>
+        {reembolsos.length === 0 ? (
+          <div style={S.empty}>Aún no hay devoluciones.</div>
+        ) : (
+          <table style={S.table}>
+            <thead><tr>
+              <th style={S.th}>Fecha</th><th style={S.th}>Persona</th><th style={S.thR}>Monto</th><th style={S.thC}></th>
+            </tr></thead>
+            <tbody>
+              {reembolsos.map((r) => (
+                <tr key={r.id}>
+                  <td style={S.td}>{r.fecha}</td>
+                  <td style={S.td}><b>{r.persona}</b></td>
+                  <td style={S.tdR}>{clp(r.monto)}</td>
+                  <td style={S.tdC}>
+                    <button onClick={() => { if (confirm("¿Anular esta devolución? Se revierte de la caja.")) onDelReembolso(r.id, r.movimiento_id); }} style={S.delBtn}>✕</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </div>
   );
@@ -990,14 +1167,17 @@ function CajaEmpresa({ movs, clp, efectoAbonos = 0 }) {
   // La caja se mueve por el monto TOTAL (con IVA): es la plata que entra/sale del banco.
   // Se usa total; si un registro antiguo no tuviera total, se cae al neto como respaldo.
   const montoCaja = (m) => (m.total != null ? m.total : m.neto);
+  // Un gasto pagado por un dueño NO mueve la caja de la empresa.
+  const tocaCaja = (m) => (m.pagado_por || "Empresa") === "Empresa";
+  const enCaja = relevantes.filter(tocaCaja);
 
-  const ingresos = relevantes.filter((m) => m.tipo === "ING").reduce((s, m) => s + montoCaja(m), 0);
-  const egresos = relevantes.filter((m) => m.tipo === "EGR").reduce((s, m) => s + montoCaja(m), 0);
+  const ingresos = enCaja.filter((m) => m.tipo === "ING").reduce((s, m) => s + montoCaja(m), 0);
+  const egresos = enCaja.filter((m) => m.tipo === "EGR").reduce((s, m) => s + montoCaja(m), 0);
   const saldo = ingresos - egresos;
-  const cajaReal = movs.filter((m) => m.pagado).reduce((s, m) => s + (m.tipo === "ING" ? montoCaja(m) : -montoCaja(m)), 0) + efectoAbonos;
+  const cajaReal = movs.filter((m) => m.pagado && tocaCaja(m)).reduce((s, m) => s + (m.tipo === "ING" ? montoCaja(m) : -montoCaja(m)), 0) + efectoAbonos;
 
   const meses = {};
-  relevantes.forEach((m) => {
+  enCaja.forEach((m) => {
     const mes = (m.fecha || "").slice(0, 7);
     if (!mes) return;
     if (!meses[mes]) meses[mes] = { ing: 0, egr: 0 };
