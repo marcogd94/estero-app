@@ -108,6 +108,7 @@ function Panel({ onLogout, email }) {
   const [facturas, setFacturas] = useState([]);
   const [materiales, setMateriales] = useState([]);
   const [trabajadores, setTrabajadores] = useState([]);
+  const [contratos, setContratos] = useState([]);
   const [dias, setDias] = useState([]);
   const [anticipos, setAnticipos] = useState([]);
   const [liqItems, setLiqItems] = useState([]);
@@ -123,7 +124,7 @@ function Panel({ onLogout, email }) {
 
   const cargarTodo = async () => {
     setCargando(true);
-    const [p, m, f, mat, tr, di, an, li, pr, ab, nm, ub, inv, ps, re] = await Promise.all([
+    const [p, m, f, mat, tr, di, an, li, pr, ab, nm, ub, inv, ps, re, co] = await Promise.all([
       supabase.from("proyectos").select("*").order("id"),
       supabase.from("movimientos").select("*").order("fecha", { ascending: false }),
       supabase.from("facturas").select("*").order("fecha", { ascending: false }),
@@ -139,6 +140,7 @@ function Panel({ onLogout, email }) {
       supabase.from("inventario").select("*").order("nombre"),
       supabase.from("pagos_sueldo").select("*").order("fecha", { ascending: false }),
       supabase.from("reembolsos").select("*").order("fecha", { ascending: false }),
+      supabase.from("contratos").select("*").order("inicio", { ascending: false }),
     ]);
     setProyectos(p.data || []);
     setMovs(m.data || []);
@@ -155,6 +157,7 @@ function Panel({ onLogout, email }) {
     setInventario(inv.data || []);
     setPagosSueldo(ps.data || []);
     setReembolsos(re.data || []);
+    setContratos(co.data || []);
     setCargando(false);
   };
 
@@ -245,17 +248,38 @@ function Panel({ onLogout, email }) {
       setTrabajadores((p) => p.filter((x) => x.id !== id));
       setDias((p) => p.filter((x) => x.trabajador !== id));
       setAnticipos((p) => p.filter((x) => x.trabajador !== id));
+      setContratos((p) => p.filter((x) => x.trabajador !== id));
     }
   };
-  // ---- Días trabajados: alternar un día ----
-  const toggleDia = async (trabajadorId, fecha) => {
-    const existe = dias.find((d) => d.trabajador === trabajadorId && d.fecha === fecha);
+  // ---- CRUD contratos/faenas ----
+  const addContrato = async (c) => {
+    const { data, error } = await supabase.from("contratos").insert(c).select();
+    if (!error && data) setContratos((p) => [...data, ...p]);
+    return error;
+  };
+  const updateContrato = async (id, cambios) => {
+    const { error } = await supabase.from("contratos").update(cambios).eq("id", id);
+    if (!error) setContratos((p) => p.map((x) => x.id === id ? { ...x, ...cambios } : x));
+    return error;
+  };
+  const delContrato = async (id) => {
+    const { error } = await supabase.from("contratos").delete().eq("id", id);
+    if (!error) {
+      setContratos((p) => p.filter((x) => x.id !== id));
+      setDias((p) => p.filter((x) => x.contrato !== id));
+      setAnticipos((p) => p.filter((x) => x.contrato !== id));
+      setLiqItems((p) => p.filter((x) => x.contrato !== id));
+    }
+  };
+  // ---- Días trabajados: alternar un día (ligado a contrato) ----
+  const toggleDia = async (trabajadorId, fecha, contratoId) => {
+    const existe = dias.find((d) => d.trabajador === trabajadorId && d.fecha === fecha && d.contrato === contratoId);
     if (existe) {
       const { error } = await supabase.from("dias_trabajados").delete().eq("id", existe.id);
       if (!error) setDias((p) => p.filter((x) => x.id !== existe.id));
     } else {
       const { data, error } = await supabase.from("dias_trabajados")
-        .insert({ trabajador: trabajadorId, fecha }).select();
+        .insert({ trabajador: trabajadorId, fecha, contrato: contratoId }).select();
       if (!error && data) setDias((p) => [...p, ...data]);
     }
   };
@@ -354,7 +378,7 @@ function Panel({ onLogout, email }) {
   };
 
   // ---- Pagar finiquito: registra el pago y descuenta de caja ----
-  const pagarFiniquito = async (trabajadorId, mes, monto, nombreTrab, fecha) => {
+  const pagarFiniquito = async (trabajadorId, mes, monto, nombreTrab, fecha, contratoId) => {
     // 1) Crear el movimiento en caja (egreso, gasto general, ya pagado)
     const mov = {
       fecha, proyecto: null, tipo: "EGR", categoria: "Sueldos administrativos",
@@ -367,7 +391,7 @@ function Panel({ onLogout, email }) {
     if (md) setMovs((p) => [...md, ...p]);
     // 2) Registrar el pago de finiquito
     const { data, error } = await supabase.from("pagos_sueldo")
-      .insert({ trabajador: trabajadorId, mes, fecha, monto, movimiento_id: movId }).select();
+      .insert({ trabajador: trabajadorId, mes, fecha, monto, movimiento_id: movId, contrato: contratoId || null }).select();
     if (!error && data) setPagosSueldo((p) => [...data, ...p]);
     return error;
   };
@@ -523,7 +547,7 @@ function Panel({ onLogout, email }) {
                 onAdd={addMov} onTogglePagado={toggleMovPagado} onDelete={delMov} />
             )}
             {tab === "caja" && <CajaEmpresa movs={movs} clp={clp} efectoAbonos={efectoAbonosCaja + efectoReembolsos} />}
-            {tab === "analisis" && <Analisis movs={movs} proyectos={proyectos} facturas={facturas} trabajadores={trabajadores} clp={clp} />}
+            {tab === "analisis" && <Analisis movs={movs} proyectos={proyectos} facturas={facturas} trabajadores={trabajadores} contratos={contratos} clp={clp} />}
             {tab === "iva" && <IvaMensual movs={movs} facturas={facturas} clp={clp} />}
             {tab === "facturacion" && (
               <Facturacion facturas={facturas} proyectos={proyectos}
@@ -540,12 +564,12 @@ function Panel({ onLogout, email }) {
                 onAddItem={addItem} onUpdateCantidad={updateItemCantidad} onDelItem={delItem} />
             )}
             {tab === "personal" && (
-              <Personal trabajadores={trabajadores} proyectos={proyectos}
+              <Personal trabajadores={trabajadores} proyectos={proyectos} contratos={contratos}
                 dias={dias} anticipos={anticipos} liqItems={liqItems} clp={clp}
-                notasMes={notasMes} onGuardarNota={guardarNota}
                 pagosSueldo={pagosSueldo} onPagarFiniquito={pagarFiniquito} onDelPagoSueldo={delPagoSueldo}
                 onAddTrabajador={addTrabajador} onDelTrabajador={delTrabajador}
                 onUpdateTrabajador={updateTrabajador}
+                onAddContrato={addContrato} onUpdateContrato={updateContrato} onDelContrato={delContrato}
                 onToggleDia={toggleDia} onAddAnticipo={addAnticipo}
                 onToggleAnticipo={toggleAnticipo} onDelAnticipo={delAnticipo}
                 onAddLiqItem={addLiqItem} onDelLiqItem={delLiqItem} />
@@ -1000,7 +1024,7 @@ function Reembolsos({ movs, reembolsos, clp, onRegistrar, onDelReembolso }) {
 }
 
 // ---------- ANÁLISIS DE GASTOS ----------
-function Analisis({ movs, proyectos, facturas = [], trabajadores = [], clp }) {
+function Analisis({ movs, proyectos, facturas = [], trabajadores = [], contratos = [], clp }) {
   const [diasMes, setDiasMes] = useState(16); // factor de días trabajados estimado al mes
   const montoCaja = (m) => (m.total != null ? m.total : m.neto);
   const nombreMes = (ym) => {
@@ -1157,7 +1181,7 @@ function Analisis({ movs, proyectos, facturas = [], trabajadores = [], clp }) {
       </div>
 
       <ProyeccionIngresos proyectos={proyectos} movs={movs} clp={clp} />
-      <ProyeccionGastos movs={movs} facturas={facturas} trabajadores={trabajadores}
+      <ProyeccionGastos movs={movs} facturas={facturas} contratos={contratos}
         diasMes={diasMes} setDiasMes={setDiasMes} nombreMes={nombreMes} clp={clp} />
     </div>
   );
@@ -1214,7 +1238,7 @@ function ProyeccionIngresos({ proyectos, movs, clp }) {
 }
 
 // ---- Sub-sección: proyección de gastos mes a mes (3 meses) ----
-function ProyeccionGastos({ movs, facturas, trabajadores, diasMes, setDiasMes, nombreMes, clp }) {
+function ProyeccionGastos({ movs, facturas, contratos = [], diasMes, setDiasMes, nombreMes, clp }) {
   const montoCaja = (m) => (m.total != null ? m.total : m.neto);
   const IVA = 0.19;
   const DIAS_BASE = 30;
@@ -1248,25 +1272,30 @@ function ProyeccionGastos({ movs, facturas, trabajadores, diasMes, setDiasMes, n
   const ivas = Object.values(porMesIva).filter((v) => v > 0);
   const ivaPromedio = ivas.length ? Math.round(ivas.reduce((a, b) => a + b, 0) / ivas.length) : 0;
 
-  // Nómina estimada de un mes dado: trabajadores con contrato vigente ese mes
+  // Nómina estimada de un mes: contratos que se solapan con el mes.
+  // El monto pactado de cada contrato se prorratea según cuántos días del contrato caen en ese mes.
   const nominaDeMes = (ym) => {
     const [y, mo] = ym.split("-").map(Number);
     const primerDia = new Date(y, mo - 1, 1);
     const ultimoDia = new Date(y, mo, 0);
+    const DIA = 86400000;
     let total = 0;
-    const activos = [];
-    trabajadores.forEach((t) => {
-      const ini = t.contrato_inicio ? new Date(t.contrato_inicio) : null;
-      const fin = t.contrato_fin ? new Date(t.contrato_fin) : null;
-      // Vigente si el contrato se solapa con el mes (o no tiene fechas = se asume vigente)
-      const vigente = (!ini || ini <= ultimoDia) && (!fin || fin >= primerDia);
-      if (vigente) {
-        const sueldo = Math.round((t.valor_mensual / DIAS_BASE) * diasMes);
-        total += sueldo;
-        activos.push(t.nombre);
-      }
+    let nContratos = 0;
+    contratos.forEach((c) => {
+      if (c.cerrado) return; // ya pagado, no proyectar
+      const ini = new Date(c.inicio + "T12:00:00");
+      const fin = c.fin ? new Date(c.fin + "T12:00:00") : new Date(ini.getTime() + 29 * DIA);
+      // Solapamiento con el mes
+      const desde = ini > primerDia ? ini : primerDia;
+      const hasta = fin < ultimoDia ? fin : ultimoDia;
+      if (hasta < desde) return; // no se solapa
+      const diasEnMes = Math.round((hasta - desde) / DIA) + 1;
+      const diasContrato = Math.max(1, Math.round((fin - ini) / DIA) + 1);
+      const porcion = Math.round((c.monto_pactado || 0) * (diasEnMes / diasContrato));
+      total += porcion;
+      nContratos++;
     });
-    return { total, activos };
+    return { total, activos: [], nContratos };
   };
 
   // Próximos 3 meses desde el mes actual
@@ -1289,17 +1318,12 @@ function ProyeccionGastos({ movs, facturas, trabajadores, diasMes, setDiasMes, n
     <div style={S.card}>
       <div style={S.cardHead}>
         <h2 style={{ ...S.h2, margin: 0 }}>Proyección de gastos (próximos 3 meses)</h2>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>Días trab./mes:</span>
-          <input type="number" value={diasMes} onChange={(e) => setDiasMes(parseInt(e.target.value, 10) || 0)}
-            style={{ ...S.input, width: 70, height: 32 }} />
-        </div>
       </div>
       <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 12px" }}>
-        Nómina: trabajadores con contrato vigente × sueldo × días estimados. Operativo: promedio de meses pasados. IVA: estimado del F29.
+        Nómina: contratos que caen en el mes, con su monto pactado prorrateado por días. Operativo: promedio de meses pasados. IVA: estimado del F29.
       </p>
-      {trabajadores.length === 0 && (
-        <p style={{ fontSize: 13, color: "var(--text-warning)" }}>Agrega trabajadores con fechas de contrato en Personal para proyectar la nómina.</p>
+      {contratos.filter((c) => !c.cerrado).length === 0 && (
+        <p style={{ fontSize: 13, color: "var(--text-warning)" }}>Crea contratos/faenas en Personal para proyectar la nómina.</p>
       )}
       <ResponsiveContainer width="100%" height={240}>
         <BarChart data={dataGrafico} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
@@ -1331,7 +1355,7 @@ function ProyeccionGastos({ movs, facturas, trabajadores, diasMes, setDiasMes, n
         </tbody>
       </table>
       <p style={{ fontSize: 11, color: "var(--text-muted)", margin: "10px 0 0" }}>
-        Estimación para planificar. La nómina usa {diasMes} días/mes; ajústalo arriba si tus turnos cambian.
+        Estimación para planificar. Los contratos ya pagados no se proyectan; crea los contratos futuros para verlos aquí.
       </p>
     </div>
   );
@@ -1848,162 +1872,151 @@ function Proyectos({ resumen, onAdd, onUpdate, onDelete }) {
   );
 }
 
-// ---------- PERSONAL ----------
-function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
-  notasMes, onGuardarNota,
+// ---------- PERSONAL (por contratos/faenas) ----------
+function Personal({ trabajadores, proyectos, contratos, dias, anticipos, liqItems, clp,
   pagosSueldo, onPagarFiniquito, onDelPagoSueldo,
-  onAddTrabajador, onDelTrabajador, onUpdateTrabajador, onToggleDia, onAddAnticipo, onToggleAnticipo, onDelAnticipo,
+  onAddTrabajador, onDelTrabajador, onUpdateTrabajador,
+  onAddContrato, onUpdateContrato, onDelContrato,
+  onToggleDia, onAddAnticipo, onToggleAnticipo, onDelAnticipo,
   onAddLiqItem, onDelLiqItem }) {
-  const [nuevo, setNuevo] = useState({ nombre: "", valor_mensual: "", contrato_inicio: "", contrato_fin: "" });
+
+  const [nuevoTrab, setNuevoTrab] = useState({ nombre: "" });
   const [errT, setErrT] = useState("");
-  const [sel, setSel] = useState(null); // id del trabajador seleccionado para el calendario
-  const [mes, setMes] = useState(today().slice(0, 7)); // YYYY-MM
+  const [sel, setSel] = useState(null);        // trabajador seleccionado
+  const [selContrato, setSelContrato] = useState(null); // contrato seleccionado
+  const [nuevoCon, setNuevoCon] = useState({ nombre: "", inicio: today(), fin: "", monto_pactado: "", dias_pactados: 16 });
   const [antNuevo, setAntNuevo] = useState({ fecha: today(), monto: "" });
   const [itNuevo, setItNuevo] = useState({ tipo: "haber", modo: "monto", concepto: "", monto: "", porcentaje: "", imponible: true });
-  const [editValId, setEditValId] = useState(null);
-  const [editVal, setEditVal] = useState("");
-  const [notaTexto, setNotaTexto] = useState("");
-  const [notaGuardada, setNotaGuardada] = useState(false);
   const [ingresoMinimoTxt, setIngresoMinimoTxt] = useState("539000");
   const ingresoMinimo = parseInt(ingresoMinimoTxt, 10) || 0;
 
-  const DIAS_ESPERADOS = 16;
-  const DIAS_MES_BASE = 30; // el valor base es mensual por 30 días
-
-  const crearTrabajador = async () => {
-    setErrT("");
-    if (!nuevo.nombre.trim() || !parseInt(nuevo.valor_mensual, 10)) { setErrT("Nombre y sueldo base mensual son obligatorios."); return; }
-    const err = await onAddTrabajador({
-      nombre: nuevo.nombre.trim(), valor_mensual: parseInt(nuevo.valor_mensual, 10), activo: true,
-      contrato_inicio: nuevo.contrato_inicio || null, contrato_fin: nuevo.contrato_fin || null,
-    });
-    if (err) { setErrT("No se pudo guardar."); return; }
-    setNuevo({ nombre: "", valor_mensual: "", contrato_inicio: "", contrato_fin: "" });
+  const fmtFecha = (f) => f || "";
+  const nombreMesTxt = (ym) => {
+    const [y, m] = ym.split("-");
+    const n = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+    return `${n[parseInt(m, 10) - 1]} ${y}`;
   };
-
-  const guardarValor = async (id) => {
-    const v = parseInt(editVal, 10);
-    if (v && v > 0) await onUpdateTrabajador(id, { valor_mensual: v });
-    setEditValId(null);
-  };
-
-  // Días del mes seleccionado
-  const [anio, mesNum] = mes.split("-").map(Number);
-  const diasDelMes = new Date(anio, mesNum, 0).getDate();
-  const listaDias = Array.from({ length: diasDelMes }, (_, i) => {
-    const d = String(i + 1).padStart(2, "0");
-    return `${mes}-${d}`;
-  });
   const nombreDiaSemana = (fechaStr) => {
     const d = new Date(fechaStr + "T12:00:00");
     return ["D", "L", "M", "M", "J", "V", "S"][d.getDay()];
   };
 
-  const trabajadorSel = trabajadores.find((t) => t.id === sel);
-
-  // Cargar la nota guardada cuando cambia el trabajador o el mes
-  const notaActual = notasMes.find((n) => n.trabajador === sel && n.mes === mes);
-  useEffect(() => {
-    setNotaTexto(notaActual ? notaActual.texto : "");
-    setNotaGuardada(false);
-  }, [sel, mes, notaActual?.texto]);
-
-  const guardarNotaLocal = async () => {
-    if (!sel) return;
-    await onGuardarNota(sel, mes, notaTexto);
-    setNotaGuardada(true);
-    setTimeout(() => setNotaGuardada(false), 2000);
+  // ---- Alta trabajador (solo nombre; el sueldo ahora va por contrato) ----
+  const crearTrabajador = async () => {
+    setErrT("");
+    if (!nuevoTrab.nombre.trim()) { setErrT("El nombre es obligatorio."); return; }
+    const err = await onAddTrabajador({ nombre: nuevoTrab.nombre.trim(), valor_mensual: 0, activo: true });
+    if (err) { setErrT("No se pudo guardar."); return; }
+    setNuevoTrab({ nombre: "" });
   };
-  const diasMarcadosSel = dias.filter((d) => d.trabajador === sel && d.fecha.startsWith(mes));
-  const nTrabajados = diasMarcadosSel.length;
 
-  // Anticipos del trabajador seleccionado
-  const antSel = anticipos.filter((a) => a.trabajador === sel);
-  const antPendientes = antSel.filter((a) => !a.descontado).reduce((s, a) => s + a.monto, 0);
+  const trabajadorSel = trabajadores.find((t) => t.id === sel);
+  const contratosDeTrab = contratos.filter((c) => c.trabajador === sel);
+  const contratoSel = contratos.find((c) => c.id === selContrato);
 
-  // Sueldo base: valor mensual (30 días) proporcional a los días trabajados.
-  const sueldoBase = trabajadorSel ? Math.round((trabajadorSel.valor_mensual / DIAS_MES_BASE) * nTrabajados) : 0;
+  // ---- Crear contrato ----
+  const crearContrato = async () => {
+    if (!sel) return;
+    const monto = parseInt(nuevoCon.monto_pactado, 10);
+    if (!nuevoCon.inicio || !monto) return;
+    const err = await onAddContrato({
+      trabajador: sel, nombre: nuevoCon.nombre.trim() || null,
+      inicio: nuevoCon.inicio, fin: nuevoCon.fin || null,
+      monto_pactado: monto, dias_pactados: parseInt(nuevoCon.dias_pactados, 10) || 16, cerrado: false,
+    });
+    if (!err) setNuevoCon({ nombre: "", inicio: today(), fin: "", monto_pactado: "", dias_pactados: 16 });
+  };
 
-  // Gratificación legal: 25% del sueldo base, con tope mensual = ingreso mínimo × 4,75 ÷ 12.
+  // ======== CÁLCULOS DEL CONTRATO SELECCIONADO ========
+  // Días del período del contrato (de inicio a fin; si no hay fin, 30 días desde inicio)
+  const listaDiasContrato = (() => {
+    if (!contratoSel) return [];
+    const ini = new Date(contratoSel.inicio + "T12:00:00");
+    const fin = contratoSel.fin ? new Date(contratoSel.fin + "T12:00:00") : new Date(ini.getTime() + 29 * 86400000);
+    const dias = [];
+    for (let d = new Date(ini); d <= fin; d.setDate(d.getDate() + 1)) {
+      dias.push(d.toISOString().slice(0, 10));
+    }
+    return dias;
+  })();
+
+  const diasMarcados = dias.filter((d) => d.contrato === selContrato);
+  const nTrabajados = diasMarcados.length;
+  const diasPactados = contratoSel?.dias_pactados || 16;
+
+  // Sueldo base = monto pactado (lo ajustas a mano con haberes/descuentos si no se trabajan todos los días)
+  const sueldoBase = contratoSel?.monto_pactado || 0;
+
+  // Gratificación legal: 25% del sueldo base, tope mensual = IM × 4,75 ÷ 12
   const gratifSinTope = Math.round(sueldoBase * 0.25);
   const topeGratif = Math.round(ingresoMinimo * 4.75 / 12);
   const gratificacion = Math.min(gratifSinTope, topeGratif);
   const gratifTopeAplicado = gratifSinTope > topeGratif;
 
-  const itemsMes = liqItems.filter((it) => it.trabajador === sel && it.mes === mes);
-
-  // --- HABERES IMPONIBLES (sueldo base + gratificación + haberes marcados imponibles) ---
-  // Los haberes fijos imponibles primero; base imponible para calcular los % de haberes imponibles.
-  const haberesImpItems = itemsMes.filter((it) => it.tipo === "haber" && it.imponible !== false);
+  const itemsCon = liqItems.filter((it) => it.contrato === selContrato);
+  const haberesImpItems = itemsCon.filter((it) => it.tipo === "haber" && it.imponible !== false);
   const haberesImpFijos = haberesImpItems.filter((it) => !it.es_porcentaje).reduce((s, it) => s + it.monto, 0);
   const baseImpParaPct = sueldoBase + gratificacion + haberesImpFijos;
   const montoHaberImp = (it) => it.es_porcentaje ? Math.round(baseImpParaPct * (it.porcentaje || 0) / 100) : it.monto;
   const haberesImpExtra = haberesImpItems.reduce((s, it) => s + montoHaberImp(it), 0);
   const totalImponible = sueldoBase + gratificacion + haberesImpExtra;
 
-  // --- DESCUENTOS (calculados sobre el total imponible) ---
   const montoItem = (it) => it.es_porcentaje ? Math.round(totalImponible * (it.porcentaje || 0) / 100) : it.monto;
-  const descuentos = itemsMes.filter((it) => it.tipo === "descuento").reduce((s, it) => s + montoItem(it), 0);
+  const descuentos = itemsCon.filter((it) => it.tipo === "descuento").reduce((s, it) => s + montoItem(it), 0);
 
-  // --- HABERES NO IMPONIBLES (se suman después de descuentos, no pagan descuentos) ---
-  const haberesNoImpItems = itemsMes.filter((it) => it.tipo === "haber" && it.imponible === false);
+  const haberesNoImpItems = itemsCon.filter((it) => it.tipo === "haber" && it.imponible === false);
   const montoHaberNoImp = (it) => it.es_porcentaje ? Math.round(totalImponible * (it.porcentaje || 0) / 100) : it.monto;
   const totalNoImponible = haberesNoImpItems.reduce((s, it) => s + montoHaberNoImp(it), 0);
 
-  // Líquido del mes = imponible − descuentos + no imponibles.
-  const liquidoMes = totalImponible - descuentos + totalNoImponible;
+  const liquido = totalImponible - descuentos + totalNoImponible;
+
+  const antSel = anticipos.filter((a) => a.contrato === selContrato);
   const anticiposEntregados = antSel.reduce((s, a) => s + a.monto, 0);
-  const saldoAPagar = liquidoMes - anticiposEntregados;
+  const saldoAPagar = liquido - anticiposEntregados;
 
-  // Pagos de finiquito ya registrados para este trabajador/mes
-  const pagosDeEste = (pagosSueldo || []).filter((p) => p.trabajador === sel && p.mes === mes);
-  const yaPagado = pagosDeEste.reduce((s, p) => s + p.monto, 0);
+  const pagosDeEste = (pagosSueldo || []).filter((p) => p.contrato === selContrato);
 
-  const pagar = async () => {
-    if (!sel || saldoAPagar <= 0) return;
-    const msg = pagosDeEste.length > 0
-      ? `Ya hay un pago registrado para ${trabajadorSel.nombre} en ${nombreMesTxt(mes)}. ¿Registrar otro pago de ${clp(saldoAPagar)}?`
-      : `¿Registrar el pago de ${clp(saldoAPagar)} a ${trabajadorSel.nombre}? Se descontará de la caja.`;
-    if (!confirm(msg)) return;
-    await onPagarFiniquito(sel, mes, saldoAPagar, trabajadorSel.nombre, today());
-  };
-
-  // Compat para el formulario (monto sobre el que se muestra un haber en %)
-  const montoHaber = (it) => (it.imponible === false ? montoHaberNoImp(it) : montoHaberImp(it));
-
+  // ---- Acciones del contrato ----
   const crearItem = async () => {
-    if (!itNuevo.concepto.trim() || !sel) return;
-    // El campo imponible solo aplica a haberes; los descuentos siempre van sobre lo imponible.
+    if (!itNuevo.concepto.trim() || !selContrato) return;
     const imp = itNuevo.tipo === "haber" ? itNuevo.imponible : true;
     if (itNuevo.modo === "porcentaje") {
       const pct = parseFloat(itNuevo.porcentaje);
       if (!pct || pct <= 0) return;
-      await onAddLiqItem({ trabajador: sel, mes, tipo: itNuevo.tipo, concepto: itNuevo.concepto.trim(),
-        monto: 0, es_porcentaje: true, porcentaje: pct, imponible: imp });
+      await onAddLiqItem({ trabajador: sel, contrato: selContrato, mes: contratoSel.inicio.slice(0, 7),
+        tipo: itNuevo.tipo, concepto: itNuevo.concepto.trim(), monto: 0, es_porcentaje: true, porcentaje: pct, imponible: imp });
     } else {
       const monto = parseInt(itNuevo.monto, 10);
       if (!monto || monto <= 0) return;
-      await onAddLiqItem({ trabajador: sel, mes, tipo: itNuevo.tipo, concepto: itNuevo.concepto.trim(),
-        monto, es_porcentaje: false, porcentaje: null, imponible: imp });
+      await onAddLiqItem({ trabajador: sel, contrato: selContrato, mes: contratoSel.inicio.slice(0, 7),
+        tipo: itNuevo.tipo, concepto: itNuevo.concepto.trim(), monto, es_porcentaje: false, porcentaje: null, imponible: imp });
     }
-    setItNuevo({ tipo: itNuevo.tipo, modo: itNuevo.modo, concepto: "", monto: "", porcentaje: "", imponible: itNuevo.imponible });
+    setItNuevo({ ...itNuevo, concepto: "", monto: "", porcentaje: "" });
   };
 
   const crearAnticipo = async () => {
     const monto = parseInt(antNuevo.monto, 10);
-    if (!monto || monto <= 0 || !sel) return;
-    await onAddAnticipo({ trabajador: sel, fecha: antNuevo.fecha, monto, descontado: false }, trabajadorSel?.nombre);
+    if (!monto || monto <= 0 || !selContrato) return;
+    await onAddAnticipo({ trabajador: sel, contrato: selContrato, fecha: antNuevo.fecha, monto, descontado: false }, trabajadorSel?.nombre);
     setAntNuevo({ fecha: today(), monto: "" });
   };
 
-  const nombreMesTxt = (ym) => {
-    const [y, m] = ym.split("-");
-    const n = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
-    return `${n[parseInt(m, 10) - 1]} ${y}`;
+  const pagar = async () => {
+    if (!selContrato || saldoAPagar <= 0) return;
+    const msg = pagosDeEste.length > 0
+      ? `Ya hay un pago para este contrato. ¿Registrar otro de ${clp(saldoAPagar)}?`
+      : `¿Pagar el finiquito de ${clp(saldoAPagar)} a ${trabajadorSel.nombre}? Se descontará de la caja.`;
+    if (!confirm(msg)) return;
+    await onPagarFiniquito(sel, contratoSel.inicio.slice(0, 7), saldoAPagar, trabajadorSel.nombre, today(), selContrato);
+    // Marcar contrato como cerrado
+    await onUpdateContrato(selContrato, { cerrado: true });
   };
-  const nombreProy = (pid) => {
-    const p = proyectos.find((x) => x.id === pid);
-    return p ? p.cliente : "—";
+
+  const estadoContrato = (c) => {
+    if (c.cerrado) return { txt: "Pagado", bg: "var(--surface-1)", fg: "var(--text-muted)" };
+    const hoy = today();
+    if (c.fin && c.fin < hoy) return { txt: "Por pagar", bg: "var(--bg-warning)", fg: "var(--text-warning)" };
+    return { txt: "Vigente", bg: "var(--bg-success)", fg: "var(--text-success)" };
   };
 
   return (
@@ -2011,26 +2024,18 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
       {/* Alta de trabajador */}
       <div style={S.card}>
         <h2 style={S.h2}>Agregar trabajador</h2>
-        <div style={S.formGrid}>
-          <Field label="Nombre">
-            <input value={nuevo.nombre} onChange={(e) => setNuevo({ ...nuevo, nombre: e.target.value })}
+        <div style={{ display: "flex", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div style={{ flex: 1, minWidth: 180 }}>
+            <div style={S.fieldLabel}>Nombre</div>
+            <input value={nuevoTrab.nombre} onChange={(e) => setNuevoTrab({ nombre: e.target.value })}
               placeholder="Juan Pérez" style={S.input} />
-          </Field>
-          <Field label="Sueldo base mensual ($ por 30 días)">
-            <input type="number" value={nuevo.valor_mensual} onChange={(e) => setNuevo({ ...nuevo, valor_mensual: e.target.value })}
-              placeholder="600000" style={S.input} />
-          </Field>
-          <Field label="Contrato desde (opcional)">
-            <input type="date" value={nuevo.contrato_inicio} onChange={(e) => setNuevo({ ...nuevo, contrato_inicio: e.target.value })} style={S.input} />
-          </Field>
-          <Field label="Contrato hasta (opcional)">
-            <input type="date" value={nuevo.contrato_fin} onChange={(e) => setNuevo({ ...nuevo, contrato_fin: e.target.value })} style={S.input} />
-          </Field>
-          <div style={{ display: "flex", alignItems: "flex-end" }}>
-            <button onClick={crearTrabajador} style={S.primaryBtn}>Agregar</button>
           </div>
+          <button onClick={crearTrabajador} style={S.primaryBtn}>Agregar</button>
         </div>
         {errT && <div style={S.loginError}>{errT}</div>}
+        <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "10px 0 0" }}>
+          El sueldo ahora se define en cada contrato/faena del trabajador, no aquí.
+        </p>
       </div>
 
       {/* Lista de trabajadores */}
@@ -2041,65 +2046,114 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
         ) : (
           <table style={S.table}>
             <thead><tr>
-              <th style={S.th}>Nombre</th>
-              <th style={S.thR}>Sueldo base mensual</th><th style={S.thC}></th><th style={S.thC}></th>
+              <th style={S.th}>Nombre</th><th style={S.thC}>Contratos</th><th style={S.thC}></th><th style={S.thC}></th>
             </tr></thead>
             <tbody>
-              {trabajadores.map((t) => (
-                <tr key={t.id} style={sel === t.id ? { background: "var(--bg-success)" } : {}}>
-                  <td style={S.td}><b>{t.nombre}</b></td>
-                  <td style={S.tdR}>
-                    {editValId === t.id ? (
-                      <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                        <input type="number" value={editVal} onChange={(e) => setEditVal(e.target.value)}
-                          style={{ ...S.input, width: 110, height: 30 }} />
-                        <button onClick={() => guardarValor(t.id)} style={{ ...S.tinyBtn, background: "#1D9E75", color: "#fff" }}>OK</button>
-                      </span>
-                    ) : (
-                      <span>
-                        {clp(t.valor_mensual)}
-                        <button onClick={() => { setEditValId(t.id); setEditVal(String(t.valor_mensual)); }}
-                          style={S.delMini} title="Editar valor">✎</button>
-                      </span>
-                    )}
-                  </td>
-                  <td style={S.tdC}>
-                    <button onClick={() => setSel(t.id)} style={{ ...S.tinyBtn,
-                      background: sel === t.id ? "#1D9E75" : "var(--surface-1)",
-                      color: sel === t.id ? "#fff" : "var(--text-secondary)" }}>
-                      {sel === t.id ? "Viendo" : "Ver mes"}
-                    </button>
-                  </td>
-                  <td style={S.tdC}>
-                    <button onClick={() => { if (confirm(`¿Eliminar a ${t.nombre}? Se borran sus días y anticipos.`)) { onDelTrabajador(t.id); if (sel === t.id) setSel(null); } }}
-                      style={S.delBtn}>✕</button>
-                  </td>
-                </tr>
-              ))}
+              {trabajadores.map((t) => {
+                const nCon = contratos.filter((c) => c.trabajador === t.id).length;
+                return (
+                  <tr key={t.id} style={sel === t.id ? { background: "var(--bg-success)" } : {}}>
+                    <td style={S.td}><b>{t.nombre}</b></td>
+                    <td style={S.tdC}>{nCon}</td>
+                    <td style={S.tdC}>
+                      <button onClick={() => { setSel(t.id); setSelContrato(null); }} style={{ ...S.tinyBtn,
+                        background: sel === t.id ? "#1D9E75" : "var(--surface-1)",
+                        color: sel === t.id ? "#fff" : "var(--text-secondary)" }}>
+                        {sel === t.id ? "Viendo" : "Ver"}
+                      </button>
+                    </td>
+                    <td style={S.tdC}>
+                      <button onClick={() => { if (confirm(`¿Eliminar a ${t.nombre}? Se borran sus contratos.`)) { onDelTrabajador(t.id); if (sel === t.id) { setSel(null); setSelContrato(null); } } }}
+                        style={S.delBtn}>✕</button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
       </div>
 
-      {/* Calendario y pago del trabajador seleccionado */}
+      {/* Contratos del trabajador seleccionado */}
       {trabajadorSel && (
-        <>
-          <div style={S.card}>
-            <div style={S.cardHead}>
-              <h2 style={S.h2}>Días trabajados — {trabajadorSel.nombre}</h2>
-              <input type="month" value={mes} onChange={(e) => setMes(e.target.value)} style={{ ...S.input, width: "auto" }} />
+        <div style={S.card}>
+          <h2 style={S.h2}>Contratos de {trabajadorSel.nombre}</h2>
+          {/* Nuevo contrato */}
+          <div style={{ ...S.formGrid, marginBottom: 16 }}>
+            <Field label="Nombre faena (opcional)">
+              <input value={nuevoCon.nombre} onChange={(e) => setNuevoCon({ ...nuevoCon, nombre: e.target.value })}
+                placeholder="Faena Copiapó" style={S.input} />
+            </Field>
+            <Field label="Desde">
+              <input type="date" value={nuevoCon.inicio} onChange={(e) => setNuevoCon({ ...nuevoCon, inicio: e.target.value })} style={S.input} />
+            </Field>
+            <Field label="Hasta">
+              <input type="date" value={nuevoCon.fin} onChange={(e) => setNuevoCon({ ...nuevoCon, fin: e.target.value })} style={S.input} />
+            </Field>
+            <Field label="Monto pactado">
+              <input type="number" value={nuevoCon.monto_pactado} onChange={(e) => setNuevoCon({ ...nuevoCon, monto_pactado: e.target.value })} placeholder="800000" style={S.input} />
+            </Field>
+            <Field label="Días pactados">
+              <input type="number" value={nuevoCon.dias_pactados} onChange={(e) => setNuevoCon({ ...nuevoCon, dias_pactados: e.target.value })} style={S.input} />
+            </Field>
+            <div style={{ display: "flex", alignItems: "flex-end" }}>
+              <button onClick={crearContrato} style={S.primaryBtn}>Crear contrato</button>
             </div>
+          </div>
+          {/* Lista de contratos */}
+          {contratosDeTrab.length === 0 ? (
+            <div style={S.empty}>Sin contratos. Crea el primero arriba.</div>
+          ) : (
+            <table style={S.table}>
+              <thead><tr>
+                <th style={S.th}>Faena</th><th style={S.th}>Período</th><th style={S.thR}>Monto</th>
+                <th style={S.thC}>Estado</th><th style={S.thC}></th><th style={S.thC}></th>
+              </tr></thead>
+              <tbody>
+                {contratosDeTrab.map((c) => {
+                  const est = estadoContrato(c);
+                  return (
+                    <tr key={c.id} style={selContrato === c.id ? { background: "var(--bg-accent)" } : {}}>
+                      <td style={S.td}>{c.nombre || "Faena"}</td>
+                      <td style={{ ...S.td, color: "var(--text-secondary)", fontSize: 12 }}>{c.inicio}{c.fin ? ` → ${c.fin}` : ""}</td>
+                      <td style={S.tdR}>{clp(c.monto_pactado)}</td>
+                      <td style={S.tdC}><span style={{ ...S.pill, marginRight: 0, background: est.bg, color: est.fg }}>{est.txt}</span></td>
+                      <td style={S.tdC}>
+                        <button onClick={() => setSelContrato(c.id)} style={{ ...S.tinyBtn,
+                          background: selContrato === c.id ? "#1D9E75" : "var(--surface-1)",
+                          color: selContrato === c.id ? "#fff" : "var(--text-secondary)" }}>
+                          {selContrato === c.id ? "Abierto" : "Abrir"}
+                        </button>
+                      </td>
+                      <td style={S.tdC}>
+                        <button onClick={() => { if (confirm("¿Eliminar este contrato y sus datos?")) { onDelContrato(c.id); if (selContrato === c.id) setSelContrato(null); } }} style={S.delBtn}>✕</button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {/* Detalle del contrato seleccionado */}
+      {contratoSel && (
+        <>
+          {/* Calendario de días */}
+          <div style={S.card}>
+            <h2 style={S.h2}>Días trabajados — {contratoSel.nombre || "Faena"}</h2>
             <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 12px" }}>
-              Toca cada día trabajado en {nombreMesTxt(mes)}. Llevas <b>{nTrabajados}</b> de {DIAS_ESPERADOS} días esperados.
-              {nTrabajados < DIAS_ESPERADOS && <span style={{ color: "var(--text-warning)" }}> Faltan {DIAS_ESPERADOS - nTrabajados} por recuperar.</span>}
-              {nTrabajados > DIAS_ESPERADOS && <span style={{ color: "var(--text-accent)" }}> {nTrabajados - DIAS_ESPERADOS} días extra.</span>}
+              Marca los días trabajados del {contratoSel.inicio}{contratoSel.fin ? ` al ${contratoSel.fin}` : ""}.
+              Llevas <b>{nTrabajados}</b> de {diasPactados} días pactados.
+              {nTrabajados < diasPactados && <span style={{ color: "var(--text-warning)" }}> Faltan {diasPactados - nTrabajados}.</span>}
             </p>
             <div style={S.calGrid}>
-              {listaDias.map((fecha) => {
-                const marcado = diasMarcadosSel.some((d) => d.fecha === fecha);
+              {listaDiasContrato.map((fecha) => {
+                const marcado = diasMarcados.some((d) => d.fecha === fecha);
                 const num = parseInt(fecha.slice(-2), 10);
                 return (
-                  <button key={fecha} onClick={() => onToggleDia(sel, fecha)}
+                  <button key={fecha} onClick={() => onToggleDia(sel, fecha, selContrato)}
                     style={{ ...S.calDay, ...(marcado ? S.calDayOn : {}) }}>
                     <span style={{ fontSize: 9, opacity: 0.6 }}>{nombreDiaSemana(fecha)}</span>
                     <span>{num}</span>
@@ -2109,25 +2163,9 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
             </div>
           </div>
 
-          {/* Notas del mes */}
-          <div style={S.card}>
-            <div style={S.cardHead}>
-              <h2 style={{ ...S.h2, margin: 0 }}>Notas del mes — {trabajadorSel.nombre}</h2>
-              <button onClick={guardarNotaLocal} style={S.primaryBtn}>
-                {notaGuardada ? "Guardado ✓" : "Guardar nota"}
-              </button>
-            </div>
-            <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 10px" }}>
-              Anota detalles de {nombreMesTxt(mes)}: licencias, días recuperados, acuerdos, observaciones.
-            </p>
-            <textarea value={notaTexto} onChange={(e) => setNotaTexto(e.target.value)}
-              placeholder="Ej: Faltó 2 días por licencia médica, se acordó recuperar el feriado…"
-              style={S.textarea} rows={4} />
-          </div>
-
           {/* Anticipos */}
           <div style={S.card}>
-            <h2 style={S.h2}>Anticipos — {trabajadorSel.nombre}</h2>
+            <h2 style={S.h2}>Anticipos — {contratoSel.nombre || "Faena"}</h2>
             <div style={{ ...S.formGrid, marginBottom: 14 }}>
               <Field label="Fecha">
                 <input type="date" value={antNuevo.fecha} onChange={(e) => setAntNuevo({ ...antNuevo, fecha: e.target.value })} style={S.input} />
@@ -2140,24 +2178,15 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
               </div>
             </div>
             {antSel.length === 0 ? (
-              <div style={S.empty}>Sin anticipos registrados.</div>
+              <div style={S.empty}>Sin anticipos.</div>
             ) : (
               <table style={S.table}>
-                <thead><tr>
-                  <th style={S.th}>Fecha</th><th style={S.thR}>Monto</th><th style={S.thC}>Estado</th><th style={S.thC}></th>
-                </tr></thead>
+                <thead><tr><th style={S.th}>Fecha</th><th style={S.thR}>Monto</th><th style={S.thC}></th></tr></thead>
                 <tbody>
                   {antSel.map((a) => (
                     <tr key={a.id}>
                       <td style={S.td}>{a.fecha}</td>
                       <td style={S.tdR}>{clp(a.monto)}</td>
-                      <td style={S.tdC}>
-                        <button onClick={() => onToggleAnticipo(a.id, a.descontado)} style={{ ...S.tinyBtn,
-                          background: a.descontado ? "var(--bg-success)" : "var(--bg-warning)",
-                          color: a.descontado ? "var(--text-success)" : "var(--text-warning)" }}>
-                          {a.descontado ? "Descontado" : "Pendiente"}
-                        </button>
-                      </td>
                       <td style={S.tdC}><button onClick={() => onDelAnticipo(a.id)} style={S.delBtn}>✕</button></td>
                     </tr>
                   ))}
@@ -2166,51 +2195,41 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
             )}
           </div>
 
-          {/* Liquidación: haberes y descuentos libres */}
+          {/* Liquidación / Finiquito */}
           <div style={S.card}>
-            <h2 style={S.h2}>Liquidación — {nombreMesTxt(mes)}</h2>
+            <h2 style={S.h2}>Finiquito — {contratoSel.nombre || "Faena"}</h2>
             <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 14px" }}>
-              El sueldo base es proporcional a los días trabajados. La gratificación (25% con tope) se calcula sola.
-              Marca cada haber como imponible o no imponible. Es una estimación para provisionar; la oficial la hace tu contador.
+              El sueldo base es el monto pactado. Si no se trabajaron todos los días, ajústalo con un descuento.
+              La gratificación (25% con tope) se calcula sola. Estimación para provisionar; la oficial la hace tu contador.
             </p>
 
-            {/* Ingreso mínimo configurable (para el tope de gratificación) */}
             <div style={{ display: "flex", gap: 10, alignItems: "flex-end", marginBottom: 16, flexWrap: "wrap" }}>
               <div>
-                <div style={S.fieldLabel}>Ingreso mínimo vigente (para tope gratif.)</div>
+                <div style={S.fieldLabel}>Ingreso mínimo (tope gratif.)</div>
                 <input type="text" inputMode="numeric" value={ingresoMinimoTxt}
-                  onChange={(e) => setIngresoMinimoTxt(e.target.value.replace(/[^\d]/g, ""))}
-                  placeholder="539000" style={{ ...S.input, width: 160 }} />
+                  onChange={(e) => setIngresoMinimoTxt(e.target.value.replace(/[^\d]/g, ""))} style={{ ...S.input, width: 160 }} />
               </div>
-              <div style={{ fontSize: 12, color: "var(--text-muted)", paddingBottom: 10 }}>
-                Tope gratificación: {clp(topeGratif)}/mes (IM × 4,75 ÷ 12)
-              </div>
+              <div style={{ fontSize: 12, color: "var(--text-muted)", paddingBottom: 10 }}>Tope: {clp(topeGratif)}/mes</div>
             </div>
 
-            {/* Agregar concepto */}
             <div style={{ ...S.formGrid, marginBottom: 16 }}>
               <Field label="Tipo">
-                <select value={itNuevo.tipo}
-                  onChange={(e) => setItNuevo({ ...itNuevo, tipo: e.target.value })}
-                  style={S.input}>
-                  <option value="haber">Haber (suma)</option>
-                  <option value="descuento">Descuento (resta)</option>
+                <select value={itNuevo.tipo} onChange={(e) => setItNuevo({ ...itNuevo, tipo: e.target.value })} style={S.input}>
+                  <option value="haber">Haber (suma)</option><option value="descuento">Descuento (resta)</option>
                 </select>
               </Field>
               <Field label="Concepto">
                 <input value={itNuevo.concepto} onChange={(e) => setItNuevo({ ...itNuevo, concepto: e.target.value })}
-                  placeholder={itNuevo.tipo === "haber" ? "Bono, colación…" : "AFP, Salud…"} style={S.input} />
+                  placeholder={itNuevo.tipo === "haber" ? "Bono, colación…" : "AFP, Salud, días no trabajados…"} style={S.input} />
               </Field>
               <Field label="Forma">
                 <select value={itNuevo.modo} onChange={(e) => setItNuevo({ ...itNuevo, modo: e.target.value })} style={S.input}>
-                  <option value="monto">Monto fijo ($)</option>
-                  <option value="porcentaje">Porcentaje (%)</option>
+                  <option value="monto">Monto fijo ($)</option><option value="porcentaje">Porcentaje (%)</option>
                 </select>
               </Field>
               {itNuevo.modo === "porcentaje" ? (
                 <Field label="Porcentaje">
-                  <input type="number" value={itNuevo.porcentaje} onChange={(e) => setItNuevo({ ...itNuevo, porcentaje: e.target.value })}
-                    placeholder={itNuevo.tipo === "haber" ? "25" : "7"} style={S.input} />
+                  <input type="number" value={itNuevo.porcentaje} onChange={(e) => setItNuevo({ ...itNuevo, porcentaje: e.target.value })} placeholder="7" style={S.input} />
                 </Field>
               ) : (
                 <Field label="Monto">
@@ -2220,8 +2239,7 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
               {itNuevo.tipo === "haber" && (
                 <Field label="¿Imponible?">
                   <select value={itNuevo.imponible ? "si" : "no"} onChange={(e) => setItNuevo({ ...itNuevo, imponible: e.target.value === "si" })} style={S.input}>
-                    <option value="si">Imponible</option>
-                    <option value="no">No imponible</option>
+                    <option value="si">Imponible</option><option value="no">No imponible</option>
                   </select>
                 </Field>
               )}
@@ -2230,49 +2248,32 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
               </div>
             </div>
 
-            {/* HABERES IMPONIBLES */}
             <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-success)", margin: "4px 0 6px" }}>HABERES IMPONIBLES</div>
-            <div style={S.pagoRow}>
-              <span>Sueldo base ({nTrabajados}/{DIAS_MES_BASE} días de {clp(trabajadorSel.valor_mensual)})</span>
-              <b>{clp(sueldoBase)}</b>
-            </div>
-            <div style={S.pagoRow}>
-              <span>Gratificación legal (25%{gratifTopeAplicado ? ", con tope" : ""})</span>
-              <b>{clp(gratificacion)}</b>
-            </div>
+            <div style={S.pagoRow}><span>Monto pactado ({nTrabajados}/{diasPactados} días)</span><b>{clp(sueldoBase)}</b></div>
+            <div style={S.pagoRow}><span>Gratificación legal (25%{gratifTopeAplicado ? ", con tope" : ""})</span><b>{clp(gratificacion)}</b></div>
             {haberesImpItems.map((it) => (
               <div key={it.id} style={S.pagoRow}>
                 <span>{it.concepto}{it.es_porcentaje ? ` (${it.porcentaje}%)` : ""} <button onClick={() => onDelLiqItem(it.id)} style={S.delMini}>✕</button></span>
                 <b>{clp(montoHaberImp(it))}</b>
               </div>
             ))}
-            <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 6 }}>
-              <span style={{ fontWeight: 600 }}>Total imponible</span><b>{clp(totalImponible)}</b>
-            </div>
+            <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 6 }}><span style={{ fontWeight: 600 }}>Total imponible</span><b>{clp(totalImponible)}</b></div>
 
-            {/* DESCUENTOS */}
-            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-danger)", margin: "16px 0 6px" }}>DESCUENTOS (sobre lo imponible)</div>
-            {itemsMes.filter((it) => it.tipo === "descuento").map((it) => (
+            <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-danger)", margin: "16px 0 6px" }}>DESCUENTOS</div>
+            {itemsCon.filter((it) => it.tipo === "descuento").map((it) => (
               <div key={it.id} style={S.pagoRow}>
-                <span>
-                  {it.concepto}{it.es_porcentaje ? ` (${it.porcentaje}%)` : ""}
-                  <button onClick={() => onDelLiqItem(it.id)} style={S.delMini}>✕</button>
-                </span>
+                <span>{it.concepto}{it.es_porcentaje ? ` (${it.porcentaje}%)` : ""} <button onClick={() => onDelLiqItem(it.id)} style={S.delMini}>✕</button></span>
                 <b style={{ color: "var(--text-danger)" }}>− {clp(montoItem(it))}</b>
               </div>
             ))}
-            {itemsMes.filter((it) => it.tipo === "descuento").length === 0 && (
+            {itemsCon.filter((it) => it.tipo === "descuento").length === 0 && (
               <div style={{ ...S.pagoRow, color: "var(--text-muted)" }}><span>Sin descuentos aún</span><span>—</span></div>
             )}
-            <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 6 }}>
-              <span style={{ fontWeight: 600 }}>Total descuentos</span>
-              <b style={{ color: "var(--text-danger)" }}>− {clp(descuentos)}</b>
-            </div>
+            <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 6 }}><span style={{ fontWeight: 600 }}>Total descuentos</span><b style={{ color: "var(--text-danger)" }}>− {clp(descuentos)}</b></div>
 
-            {/* HABERES NO IMPONIBLES */}
             <div style={{ fontSize: 12, fontWeight: 600, color: "var(--text-accent)", margin: "16px 0 6px" }}>HABERES NO IMPONIBLES</div>
             {haberesNoImpItems.length === 0 ? (
-              <div style={{ ...S.pagoRow, color: "var(--text-muted)" }}><span>Ninguno (ej. colación, movilización)</span><span>—</span></div>
+              <div style={{ ...S.pagoRow, color: "var(--text-muted)" }}><span>Ninguno (ej. colación)</span><span>—</span></div>
             ) : haberesNoImpItems.map((it) => (
               <div key={it.id} style={S.pagoRow}>
                 <span>{it.concepto}{it.es_porcentaje ? ` (${it.porcentaje}%)` : ""} <button onClick={() => onDelLiqItem(it.id)} style={S.delMini}>✕</button></span>
@@ -2281,26 +2282,21 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
             ))}
 
             <div style={{ ...S.pagoRow, borderTop: "1.5px solid var(--border-strong)", paddingTop: 12, marginTop: 8 }}>
-              <span style={{ fontWeight: 700, fontSize: 16 }}>Líquido del mes</span>
-              <b style={{ fontSize: 20, color: "var(--text-primary)" }}>{clp(liquidoMes)}</b>
+              <span style={{ fontWeight: 700, fontSize: 16 }}>Líquido del finiquito</span>
+              <b style={{ fontSize: 20, color: "var(--text-primary)" }}>{clp(liquido)}</b>
             </div>
-
             {anticiposEntregados > 0 && (
-              <div style={{ ...S.pagoRow, marginTop: 4 }}>
-                <span>Anticipos ya entregados</span>
-                <b style={{ color: "var(--text-danger)" }}>− {clp(anticiposEntregados)}</b>
-              </div>
+              <div style={{ ...S.pagoRow, marginTop: 4 }}><span>Anticipos ya entregados</span><b style={{ color: "var(--text-danger)" }}>− {clp(anticiposEntregados)}</b></div>
             )}
             <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 8 }}>
               <span style={{ fontWeight: 700, fontSize: 16, color: "var(--text-success)" }}>Saldo a pagar</span>
               <b style={{ fontSize: 22, color: "var(--text-success)" }}>{clp(saldoAPagar)}</b>
             </div>
 
-            {/* Botón de pago */}
             <div style={{ marginTop: 16 }}>
               {pagosDeEste.length > 0 && (
                 <div style={{ fontSize: 13, color: "var(--text-secondary)", marginBottom: 8 }}>
-                  Pagos registrados este mes:
+                  Pagos registrados:
                   {pagosDeEste.map((p) => (
                     <div key={p.id} style={{ ...S.pagoRow, fontSize: 13 }}>
                       <span>{p.fecha} — {clp(p.monto)} <button onClick={() => { if (confirm("¿Anular este pago? Se revierte de la caja.")) onDelPagoSueldo(p.id, p.movimiento_id); }} style={S.delMini}>anular</button></span>
@@ -2311,15 +2307,15 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
               )}
               {saldoAPagar > 0 ? (
                 <button onClick={pagar} style={{ ...S.primaryBtn, width: "100%", height: 44 }}>
-                  Pagar {clp(saldoAPagar)} y descontar de caja
+                  Pagar finiquito {clp(saldoAPagar)} y descontar de caja
                 </button>
               ) : (
                 <div style={{ ...S.empty, padding: "12px" }}>
-                  {liquidoMes <= 0 ? "Marca días trabajados para calcular el pago." : "Saldo cubierto por los anticipos."}
+                  {liquido <= 0 ? "Marca días o define el monto pactado." : "Saldo cubierto por los anticipos."}
                 </div>
               )}
               <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "8px 0 0" }}>
-                Al pagar, se registra un egreso en la caja por el saldo (los anticipos ya se descontaron antes, así no se paga doble).
+                Al pagar, se registra un egreso en caja por el saldo (los anticipos ya se descontaron antes). El contrato queda marcado como pagado.
               </p>
             </div>
           </div>
