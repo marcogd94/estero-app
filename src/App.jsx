@@ -523,7 +523,7 @@ function Panel({ onLogout, email }) {
                 onAdd={addMov} onTogglePagado={toggleMovPagado} onDelete={delMov} />
             )}
             {tab === "caja" && <CajaEmpresa movs={movs} clp={clp} efectoAbonos={efectoAbonosCaja + efectoReembolsos} />}
-            {tab === "analisis" && <Analisis movs={movs} proyectos={proyectos} clp={clp} />}
+            {tab === "analisis" && <Analisis movs={movs} proyectos={proyectos} facturas={facturas} trabajadores={trabajadores} clp={clp} />}
             {tab === "iva" && <IvaMensual movs={movs} facturas={facturas} clp={clp} />}
             {tab === "facturacion" && (
               <Facturacion facturas={facturas} proyectos={proyectos}
@@ -1000,7 +1000,8 @@ function Reembolsos({ movs, reembolsos, clp, onRegistrar, onDelReembolso }) {
 }
 
 // ---------- ANÁLISIS DE GASTOS ----------
-function Analisis({ movs, proyectos, clp }) {
+function Analisis({ movs, proyectos, facturas = [], trabajadores = [], clp }) {
+  const [diasMes, setDiasMes] = useState(16); // factor de días trabajados estimado al mes
   const montoCaja = (m) => (m.total != null ? m.total : m.neto);
   const nombreMes = (ym) => {
     const [y, m] = ym.split("-");
@@ -1154,6 +1155,184 @@ function Analisis({ movs, proyectos, clp }) {
           </tbody>
         </table>
       </div>
+
+      <ProyeccionIngresos proyectos={proyectos} movs={movs} clp={clp} />
+      <ProyeccionGastos movs={movs} facturas={facturas} trabajadores={trabajadores}
+        diasMes={diasMes} setDiasMes={setDiasMes} nombreMes={nombreMes} clp={clp} />
+    </div>
+  );
+}
+
+// ---- Sub-sección: proyección de ingresos por facturar ----
+function ProyeccionIngresos({ proyectos, movs, clp }) {
+  // Facturado por proyecto = ingresos tipo Facturación en movimientos (neto), por proyecto.
+  const facturadoProy = {};
+  movs.filter((m) => m.tipo === "ING" && m.proyecto).forEach((m) => {
+    facturadoProy[m.proyecto] = (facturadoProy[m.proyecto] || 0) + (m.neto || 0);
+  });
+  const activos = proyectos.filter((p) => (p.estado || "Activo") !== "Terminado" && (p.presupuesto || 0) > 0);
+  const filas = activos.map((p) => {
+    const facturado = facturadoProy[p.id] || 0;
+    return { ...p, facturado, porFacturar: Math.max(0, (p.presupuesto || 0) - facturado) };
+  });
+  const totalPorFacturar = filas.reduce((s, p) => s + p.porFacturar, 0);
+
+  return (
+    <div style={S.card}>
+      <h2 style={S.h2}>Proyección de ingresos (por facturar)</h2>
+      <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 12px" }}>
+        Presupuesto de cada proyecto activo menos lo que ya facturaste = ingreso que aún puedes facturar.
+      </p>
+      {filas.length === 0 ? (
+        <div style={S.empty}>Sin proyectos activos con presupuesto cargado.</div>
+      ) : (
+        <table style={S.table}>
+          <thead><tr>
+            <th style={S.th}>Proyecto</th><th style={S.thR}>Presupuesto</th>
+            <th style={S.thR}>Facturado</th><th style={S.thR}>Por facturar</th>
+          </tr></thead>
+          <tbody>
+            {filas.map((p) => (
+              <tr key={p.id}>
+                <td style={S.td}><b>{p.id}</b> · {p.cliente}</td>
+                <td style={S.tdR}>{clp(p.presupuesto)}</td>
+                <td style={{ ...S.tdR, color: "var(--text-muted)" }}>{clp(p.facturado)}</td>
+                <td style={{ ...S.tdR, fontWeight: 500, color: "var(--text-success)" }}>{clp(p.porFacturar)}</td>
+              </tr>
+            ))}
+            <tr>
+              <td style={{ ...S.td, fontWeight: 600, borderTop: "1.5px solid var(--border-strong)" }}>Total por facturar</td>
+              <td style={{ borderTop: "1.5px solid var(--border-strong)" }}></td>
+              <td style={{ borderTop: "1.5px solid var(--border-strong)" }}></td>
+              <td style={{ ...S.tdR, fontWeight: 600, color: "var(--text-success)", borderTop: "1.5px solid var(--border-strong)" }}>{clp(totalPorFacturar)}</td>
+            </tr>
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+// ---- Sub-sección: proyección de gastos mes a mes (3 meses) ----
+function ProyeccionGastos({ movs, facturas, trabajadores, diasMes, setDiasMes, nombreMes, clp }) {
+  const montoCaja = (m) => (m.total != null ? m.total : m.neto);
+  const IVA = 0.19;
+  const DIAS_BASE = 30;
+
+  const egresos = movs.filter((m) => m.tipo === "EGR" && (m.pagado_por || "Empresa") === "Empresa");
+
+  // Meses con datos (para promedios)
+  const mesesSet = new Set(egresos.map((m) => (m.fecha || "").slice(0, 7)).filter(Boolean));
+  const nMeses = Math.max(1, mesesSet.size);
+
+  // Gasto operativo = egresos SIN sueldos/anticipos/finiquitos/impuestos (esos se proyectan aparte)
+  const CAT_PERSONAL = ["Sueldos administrativos", "Anticipo sueldo", "Mano de Obra Directa"];
+  const CAT_IMPUESTO = ["Pago de impuestos (F29)"];
+  const opEgresos = egresos.filter((m) => !CAT_PERSONAL.includes(m.categoria) && !CAT_IMPUESTO.includes(m.categoria));
+  const totalOp = opEgresos.reduce((s, m) => s + montoCaja(m), 0);
+  const promedioOp = Math.round(totalOp / nMeses);
+
+  // IVA promedio de los últimos meses: débito (facturas) − crédito (gastos con factura)
+  const porMesIva = {};
+  facturas.forEach((f) => {
+    if (f.exento) return;
+    const mes = (f.fecha || "").slice(0, 7); if (!mes) return;
+    porMesIva[mes] = (porMesIva[mes] || 0) + Math.round(f.neto * IVA); // débito
+  });
+  egresos.forEach((m) => {
+    if (m.doc !== "FACTURA") return;
+    const mes = (m.fecha || "").slice(0, 7); if (!mes) return;
+    const iva = (m.total || 0) - (m.neto || 0);
+    if (iva > 0) porMesIva[mes] = (porMesIva[mes] || 0) - iva; // crédito
+  });
+  const ivas = Object.values(porMesIva).filter((v) => v > 0);
+  const ivaPromedio = ivas.length ? Math.round(ivas.reduce((a, b) => a + b, 0) / ivas.length) : 0;
+
+  // Nómina estimada de un mes dado: trabajadores con contrato vigente ese mes
+  const nominaDeMes = (ym) => {
+    const [y, mo] = ym.split("-").map(Number);
+    const primerDia = new Date(y, mo - 1, 1);
+    const ultimoDia = new Date(y, mo, 0);
+    let total = 0;
+    const activos = [];
+    trabajadores.forEach((t) => {
+      const ini = t.contrato_inicio ? new Date(t.contrato_inicio) : null;
+      const fin = t.contrato_fin ? new Date(t.contrato_fin) : null;
+      // Vigente si el contrato se solapa con el mes (o no tiene fechas = se asume vigente)
+      const vigente = (!ini || ini <= ultimoDia) && (!fin || fin >= primerDia);
+      if (vigente) {
+        const sueldo = Math.round((t.valor_mensual / DIAS_BASE) * diasMes);
+        total += sueldo;
+        activos.push(t.nombre);
+      }
+    });
+    return { total, activos };
+  };
+
+  // Próximos 3 meses desde el mes actual
+  const hoy = new Date();
+  const proximos = [];
+  for (let i = 1; i <= 3; i++) {
+    const d = new Date(hoy.getFullYear(), hoy.getMonth() + i, 1);
+    const ym = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+    const nom = nominaDeMes(ym);
+    const totalMes = nom.total + promedioOp + ivaPromedio;
+    proximos.push({ ym, nomina: nom.total, activos: nom.activos, operativo: promedioOp, iva: ivaPromedio, total: totalMes });
+  }
+
+  const dataGrafico = proximos.map((p) => ({
+    mes: nombreMes(p.ym), Nómina: p.nomina, Operativo: p.operativo, IVA: p.iva,
+  }));
+  const miles = (v) => "$" + Math.round(v / 1000).toLocaleString("es-CL") + "k";
+
+  return (
+    <div style={S.card}>
+      <div style={S.cardHead}>
+        <h2 style={{ ...S.h2, margin: 0 }}>Proyección de gastos (próximos 3 meses)</h2>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 12, color: "var(--text-secondary)" }}>Días trab./mes:</span>
+          <input type="number" value={diasMes} onChange={(e) => setDiasMes(parseInt(e.target.value, 10) || 0)}
+            style={{ ...S.input, width: 70, height: 32 }} />
+        </div>
+      </div>
+      <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 12px" }}>
+        Nómina: trabajadores con contrato vigente × sueldo × días estimados. Operativo: promedio de meses pasados. IVA: estimado del F29.
+      </p>
+      {trabajadores.length === 0 && (
+        <p style={{ fontSize: 13, color: "var(--text-warning)" }}>Agrega trabajadores con fechas de contrato en Personal para proyectar la nómina.</p>
+      )}
+      <ResponsiveContainer width="100%" height={240}>
+        <BarChart data={dataGrafico} margin={{ top: 4, right: 8, left: 8, bottom: 4 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+          <XAxis dataKey="mes" tick={{ fontSize: 12, fill: "var(--text-secondary)" }} />
+          <YAxis tickFormatter={miles} tick={{ fontSize: 11, fill: "var(--text-muted)" }} width={54} />
+          <Tooltip formatter={(v) => clp(v)} />
+          <Legend wrapperStyle={{ fontSize: 12 }} />
+          <Bar dataKey="Nómina" stackId="a" fill="#534AB7" />
+          <Bar dataKey="Operativo" stackId="a" fill="#EF9F27" />
+          <Bar dataKey="IVA" stackId="a" fill="#E24B4A" radius={[3, 3, 0, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
+      <table style={{ ...S.table, marginTop: 12 }}>
+        <thead><tr>
+          <th style={S.th}>Mes</th><th style={S.thR}>Nómina</th><th style={S.thR}>Operativo</th>
+          <th style={S.thR}>IVA est.</th><th style={S.thR}>Total gasto</th>
+        </tr></thead>
+        <tbody>
+          {proximos.map((p) => (
+            <tr key={p.ym}>
+              <td style={S.td}><b>{nombreMes(p.ym)}</b></td>
+              <td style={{ ...S.tdR, color: "#534AB7" }}>{clp(p.nomina)}</td>
+              <td style={{ ...S.tdR, color: "var(--text-warning)" }}>{clp(p.operativo)}</td>
+              <td style={{ ...S.tdR, color: "var(--text-danger)" }}>{clp(p.iva)}</td>
+              <td style={{ ...S.tdR, fontWeight: 600 }}>{clp(p.total)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p style={{ fontSize: 11, color: "var(--text-muted)", margin: "10px 0 0" }}>
+        Estimación para planificar. La nómina usa {diasMes} días/mes; ajústalo arriba si tus turnos cambian.
+      </p>
     </div>
   );
 }
@@ -1675,7 +1854,7 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
   pagosSueldo, onPagarFiniquito, onDelPagoSueldo,
   onAddTrabajador, onDelTrabajador, onUpdateTrabajador, onToggleDia, onAddAnticipo, onToggleAnticipo, onDelAnticipo,
   onAddLiqItem, onDelLiqItem }) {
-  const [nuevo, setNuevo] = useState({ nombre: "", valor_mensual: "" });
+  const [nuevo, setNuevo] = useState({ nombre: "", valor_mensual: "", contrato_inicio: "", contrato_fin: "" });
   const [errT, setErrT] = useState("");
   const [sel, setSel] = useState(null); // id del trabajador seleccionado para el calendario
   const [mes, setMes] = useState(today().slice(0, 7)); // YYYY-MM
@@ -1696,9 +1875,10 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
     if (!nuevo.nombre.trim() || !parseInt(nuevo.valor_mensual, 10)) { setErrT("Nombre y sueldo base mensual son obligatorios."); return; }
     const err = await onAddTrabajador({
       nombre: nuevo.nombre.trim(), valor_mensual: parseInt(nuevo.valor_mensual, 10), activo: true,
+      contrato_inicio: nuevo.contrato_inicio || null, contrato_fin: nuevo.contrato_fin || null,
     });
     if (err) { setErrT("No se pudo guardar."); return; }
-    setNuevo({ nombre: "", valor_mensual: "" });
+    setNuevo({ nombre: "", valor_mensual: "", contrato_inicio: "", contrato_fin: "" });
   };
 
   const guardarValor = async (id) => {
@@ -1839,6 +2019,12 @@ function Personal({ trabajadores, proyectos, dias, anticipos, liqItems, clp,
           <Field label="Sueldo base mensual ($ por 30 días)">
             <input type="number" value={nuevo.valor_mensual} onChange={(e) => setNuevo({ ...nuevo, valor_mensual: e.target.value })}
               placeholder="600000" style={S.input} />
+          </Field>
+          <Field label="Contrato desde (opcional)">
+            <input type="date" value={nuevo.contrato_inicio} onChange={(e) => setNuevo({ ...nuevo, contrato_inicio: e.target.value })} style={S.input} />
+          </Field>
+          <Field label="Contrato hasta (opcional)">
+            <input type="date" value={nuevo.contrato_fin} onChange={(e) => setNuevo({ ...nuevo, contrato_fin: e.target.value })} style={S.input} />
           </Field>
           <div style={{ display: "flex", alignItems: "flex-end" }}>
             <button onClick={crearTrabajador} style={S.primaryBtn}>Agregar</button>
