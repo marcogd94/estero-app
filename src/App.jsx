@@ -23,10 +23,11 @@ const CATEGORIAS_ING = [
   "Otros Ingresos",
 ];
 const UNIDADES = ["un", "m", "m²", "m³", "kg", "sacos"];
-const ESTADOS_FACT = ["Emitida", "Por cobrar", "Pagada"];
+const ESTADOS_FACT = ["Emitida", "Por cobrar", "En factoring", "Pagada"];
 const ESTADO_COLOR = {
   Emitida: { bg: "var(--bg-warning)", fg: "var(--text-warning)" },
   "Por cobrar": { bg: "var(--bg-accent)", fg: "var(--text-accent)" },
+  "En factoring": { bg: "#efeafe", fg: "#534AB7" },
   Pagada: { bg: "var(--bg-success)", fg: "var(--text-success)" },
 };
 
@@ -208,7 +209,46 @@ function Panel({ onLogout, email }) {
     const { error } = await supabase.from("facturas").update({ estado }).eq("id", id);
     if (!error) setFacturas((p) => p.map((x) => x.id === id ? { ...x, estado } : x));
   };
+  // ---- Factorizar una factura: adelanto entra a caja, comisión es gasto ----
+  const factorizarFactura = async (factura, adelanto, fecha) => {
+    const totalFactura = Math.round(factura.neto * (factura.exento ? 1 : 1 + IVA_RATE));
+    const comision = Math.max(0, totalFactura - adelanto);
+    // 1) Ingreso a caja por el adelanto
+    const movIng = {
+      fecha, proyecto: factura.proyecto || null, tipo: "ING", categoria: "Facturación Proyectos",
+      detalle: `Factoring factura ${factura.folio} (${factura.cliente})`, neto: adelanto, total: adelanto,
+      doc: "FACTURA", pagado: true,
+    };
+    const { data: mi, error: ei } = await supabase.from("movimientos").insert(movIng).select();
+    if (ei) return ei;
+    const movIngId = mi?.[0]?.id ?? null;
+    if (mi) setMovs((p) => [...mi, ...p]);
+    // 2) Egreso por la comisión (si hay)
+    let movComId = null;
+    if (comision > 0) {
+      const movEgr = {
+        fecha, proyecto: null, tipo: "EGR", categoria: "Gastos financieros",
+        detalle: `Comisión factoring factura ${factura.folio}`, neto: comision, total: comision,
+        doc: "FACTURA", pagado: true,
+      };
+      const { data: mc, error: ec } = await supabase.from("movimientos").insert(movEgr).select();
+      if (!ec && mc) { movComId = mc?.[0]?.id ?? null; setMovs((p) => [...mc, ...p]); }
+    }
+    // 3) Actualizar la factura
+    const cambios = {
+      estado: "En factoring", factoring: true, factoring_adelanto: adelanto,
+      factoring_comision: comision, factoring_fecha: fecha,
+      mov_adelanto_id: movIngId, mov_comision_id: movComId,
+    };
+    const { error: ef } = await supabase.from("facturas").update(cambios).eq("id", factura.id);
+    if (!ef) setFacturas((p) => p.map((x) => x.id === factura.id ? { ...x, ...cambios } : x));
+    return ef;
+  };
   const delFactura = async (id) => {
+    // Borrar también los movimientos de factoring asociados, si los tiene
+    const fac = facturas.find((x) => x.id === id);
+    if (fac?.mov_adelanto_id) { await supabase.from("movimientos").delete().eq("id", fac.mov_adelanto_id); setMovs((p) => p.filter((x) => x.id !== fac.mov_adelanto_id)); }
+    if (fac?.mov_comision_id) { await supabase.from("movimientos").delete().eq("id", fac.mov_comision_id); setMovs((p) => p.filter((x) => x.id !== fac.mov_comision_id)); }
     const { error } = await supabase.from("facturas").delete().eq("id", id);
     if (!error) setFacturas((p) => p.filter((x) => x.id !== id));
   };
@@ -551,7 +591,8 @@ function Panel({ onLogout, email }) {
             {tab === "iva" && <IvaMensual movs={movs} facturas={facturas} clp={clp} />}
             {tab === "facturacion" && (
               <Facturacion facturas={facturas} proyectos={proyectos}
-                onAdd={addFactura} onEstado={setEstadoFactura} onDelete={delFactura} />
+                onAdd={addFactura} onEstado={setEstadoFactura} onDelete={delFactura}
+                onFactorizar={factorizarFactura} />
             )}
             {tab === "materiales" && (
               <Materiales materiales={materiales} proyectos={proyectos}
@@ -1489,11 +1530,21 @@ function CajaEmpresa({ movs, clp, efectoAbonos = 0 }) {
 }
 
 // ---------- FACTURACIÓN ----------
-function Facturacion({ facturas, proyectos, onAdd, onEstado, onDelete }) {
+function Facturacion({ facturas, proyectos, onAdd, onEstado, onDelete, onFactorizar }) {
   const mas30 = () => { const d = new Date(); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10); };
   const [f, setF] = useState({ fecha: today(), vencimiento: mas30(), proyecto: "", folio: "", neto: "", exento: false, estado: "Emitida" });
+  const [factDe, setFactDe] = useState(null); // factura que se está factorizando
+  const [fact, setFact] = useState({ adelanto: "", fecha: today() });
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
   const total = (neto, exento) => Math.round(neto * (exento ? 1 : 1 + IVA_RATE));
+
+  const abrirFactoring = (factura) => { setFactDe(factura); setFact({ adelanto: "", fecha: today() }); };
+  const confirmarFactoring = async () => {
+    const adelanto = parseInt(fact.adelanto, 10);
+    if (!adelanto || adelanto <= 0) return;
+    await onFactorizar(factDe, adelanto, fact.fecha);
+    setFactDe(null);
+  };
 
   const submit = () => {
     const neto = parseFloat(f.neto);
@@ -1586,10 +1637,10 @@ function Facturacion({ facturas, proyectos, onAdd, onEstado, onDelete }) {
           <thead><tr>
             <th style={S.th}>Fecha</th><th style={S.th}>Folio</th><th style={S.th}>Cliente</th>
             <th style={S.thR}>Neto</th><th style={S.thR}>IVA</th><th style={S.thR}>Total</th>
-            <th style={S.thC}>Vence</th><th style={S.thC}>Estado</th><th style={S.thC}></th>
+            <th style={S.thC}>Vence</th><th style={S.thC}>Estado</th><th style={S.thC}></th><th style={S.thC}></th>
           </tr></thead>
           <tbody>
-            {facturas.length === 0 && <tr><td colSpan={9} style={S.empty}>Sin facturas.</td></tr>}
+            {facturas.length === 0 && <tr><td colSpan={10} style={S.empty}>Sin facturas.</td></tr>}
             {facturas.map((x) => {
               const iva = x.exento ? 0 : Math.round(x.neto * IVA_RATE);
               const sem = semaforo(x);
@@ -1617,6 +1668,16 @@ function Facturacion({ facturas, proyectos, onAdd, onEstado, onDelete }) {
                       style={{ ...S.pillSelect, background: ESTADO_COLOR[x.estado].bg, color: ESTADO_COLOR[x.estado].fg }}>
                       {ESTADOS_FACT.map((e) => <option key={e}>{e}</option>)}
                     </select>
+                    {x.factoring && (
+                      <div style={{ fontSize: 11, color: "#534AB7", marginTop: 3 }}>
+                        adelanto {clp(x.factoring_adelanto)} · com. {clp(x.factoring_comision)}
+                      </div>
+                    )}
+                  </td>
+                  <td style={S.tdC}>
+                    {x.estado !== "Pagada" && !x.factoring && (
+                      <button onClick={() => abrirFactoring(x)} style={{ ...S.tinyBtn, background: "#efeafe", color: "#534AB7" }}>Factorizar</button>
+                    )}
                   </td>
                   <td style={S.tdC}><button onClick={() => onDelete(x.id)} style={S.delBtn}>✕</button></td>
                 </tr>
@@ -1625,6 +1686,39 @@ function Facturacion({ facturas, proyectos, onAdd, onEstado, onDelete }) {
           </tbody>
         </table>
       </div>
+
+      {/* Modal de factoring */}
+      {factDe && (
+        <div style={{ minHeight: 320, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 12, padding: 16 }}>
+          <div style={{ ...S.card, maxWidth: 420, width: "100%", marginBottom: 0 }}>
+            <h2 style={S.h2}>Factorizar factura {factDe.folio}</h2>
+            <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 14px" }}>
+              Total de la factura: <b>{clp(total(factDe.neto, factDe.exento))}</b> ({factDe.cliente}).
+              Ingresa cuánto te adelantó el factoring (total menos su comisión).
+            </p>
+            <Field label="Fecha del adelanto">
+              <input type="date" value={fact.fecha} onChange={(e) => setFact({ ...fact, fecha: e.target.value })} style={S.input} />
+            </Field>
+            <div style={{ marginTop: 10 }}>
+              <div style={S.fieldLabel}>Monto adelantado</div>
+              <input type="number" value={fact.adelanto} onChange={(e) => setFact({ ...fact, adelanto: e.target.value })} placeholder="0" style={S.input} />
+            </div>
+            {fact.adelanto && (
+              <div style={{ ...S.pagoRow, marginTop: 10 }}>
+                <span>Comisión factoring (gasto)</span>
+                <b style={{ color: "var(--text-danger)" }}>{clp(Math.max(0, total(factDe.neto, factDe.exento) - parseInt(fact.adelanto, 10)))}</b>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+              <button onClick={confirmarFactoring} style={{ ...S.primaryBtn, flex: 1 }}>Confirmar factoring</button>
+              <button onClick={() => setFactDe(null)} style={S.logoutBtn}>Cancelar</button>
+            </div>
+            <p style={{ fontSize: 11, color: "var(--text-muted)", margin: "10px 0 0" }}>
+              El adelanto entra a caja como ingreso; la comisión se registra como gasto financiero. La factura queda "En factoring" hasta que la marques Pagada.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
