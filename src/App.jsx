@@ -539,8 +539,10 @@ function Panel({ onLogout, email }) {
   const totales = useMemo(() => {
     const ing = movs.filter((x) => x.tipo === "ING").reduce((s, x) => s + x.neto, 0);
     const egr = movs.filter((x) => x.tipo === "EGR").reduce((s, x) => s + x.neto, 0);
-    const cajaIn = movs.filter((x) => x.tipo === "ING" && x.pagado).reduce((s, x) => s + montoCaja(x), 0);
-    const cajaOut = movs.filter((x) => x.tipo === "EGR" && x.pagado && tocaCaja(x)).reduce((s, x) => s + montoCaja(x), 0);
+    // MISMA fórmula exacta que la pestaña "Caja empresa" (cajaReal), para que el número coincida al peso.
+    const cajaBase = movs
+      .filter((x) => x.pagado && tocaCaja(x))
+      .reduce((s, x) => s + (x.tipo === "ING" ? montoCaja(x) : -montoCaja(x)), 0);
     const totalFact = (f) => Math.round(f.neto * (f.exento ? 1 : 1 + IVA_RATE));
     // Por cobrar: facturas no pagadas y que no estén en factoring (esas ya te adelantaron la plata)
     const porCobrar = facturas.filter((f) => f.estado !== "Pagada" && f.estado !== "En factoring")
@@ -563,7 +565,7 @@ function Panel({ onLogout, email }) {
     const reembolsosPendientes = Math.max(0, gastosDuenos - devuelto);
     return {
       ing, egr, resultado: ing - egr,
-      caja: cajaIn - cajaOut + efectoAbonosCaja + efectoReembolsos, porCobrar,
+      caja: cajaBase + efectoAbonosCaja + efectoReembolsos, porCobrar,
       montoVencido, nVencidas: facturasVencidas.length,
       deudaPorPagar, prestadoPorCobrar, reembolsosPendientes,
     };
