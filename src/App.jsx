@@ -541,10 +541,33 @@ function Panel({ onLogout, email }) {
     const egr = movs.filter((x) => x.tipo === "EGR").reduce((s, x) => s + x.neto, 0);
     const cajaIn = movs.filter((x) => x.tipo === "ING" && x.pagado).reduce((s, x) => s + montoCaja(x), 0);
     const cajaOut = movs.filter((x) => x.tipo === "EGR" && x.pagado && tocaCaja(x)).reduce((s, x) => s + montoCaja(x), 0);
-    const porCobrar = facturas.filter((f) => f.estado !== "Pagada")
-      .reduce((s, f) => s + f.neto * (f.exento ? 1 : 1 + IVA_RATE), 0);
-    return { ing, egr, resultado: ing - egr, caja: cajaIn - cajaOut + efectoAbonosCaja + efectoReembolsos, porCobrar };
-  }, [movs, facturas, efectoAbonosCaja, efectoReembolsos]);
+    const totalFact = (f) => Math.round(f.neto * (f.exento ? 1 : 1 + IVA_RATE));
+    // Por cobrar: facturas no pagadas y que no estén en factoring (esas ya te adelantaron la plata)
+    const porCobrar = facturas.filter((f) => f.estado !== "Pagada" && f.estado !== "En factoring")
+      .reduce((s, f) => s + totalFact(f), 0);
+    // Facturas vencidas (no pagadas, sin factoring, con vencimiento pasado)
+    const hoy = today();
+    const facturasVencidas = facturas.filter((f) => f.estado !== "Pagada" && f.estado !== "En factoring" && f.vencimiento && f.vencimiento < hoy);
+    const montoVencido = facturasVencidas.reduce((s, f) => s + totalFact(f), 0);
+    // Deuda por pagar y por cobrar (saldos de préstamos pendientes)
+    const saldoPrest = (tipo) => prestamos.filter((p) => p.tipo === tipo).reduce((s, p) => {
+      const pagado = abonos.filter((a) => a.prestamo === p.id).reduce((x, a) => x + a.monto, 0);
+      return s + Math.max(0, (p.monto || 0) - pagado);
+    }, 0);
+    const deudaPorPagar = saldoPrest("por_pagar");
+    const prestadoPorCobrar = saldoPrest("por_cobrar");
+    // Reembolsos pendientes a dueños
+    const gastosDuenos = movs.filter((m) => m.tipo === "EGR" && (m.pagado_por === "Marco" || m.pagado_por === "Diego"))
+      .reduce((s, m) => s + montoCaja(m), 0);
+    const devuelto = reembolsos.reduce((s, r) => s + r.monto, 0);
+    const reembolsosPendientes = Math.max(0, gastosDuenos - devuelto);
+    return {
+      ing, egr, resultado: ing - egr,
+      caja: cajaIn - cajaOut + efectoAbonosCaja + efectoReembolsos, porCobrar,
+      montoVencido, nVencidas: facturasVencidas.length,
+      deudaPorPagar, prestadoPorCobrar, reembolsosPendientes,
+    };
+  }, [movs, facturas, prestamos, abonos, reembolsos, efectoAbonosCaja, efectoReembolsos]);
 
   const movsFiltrados = useMemo(() => {
     const l = filtroProy === "TODOS" ? movs : movs.filter((x) => x.proyecto === filtroProy);
@@ -669,15 +692,45 @@ function Panel({ onLogout, email }) {
 
 // ---------- RESUMEN ----------
 function Resumen({ totales, resumen, setTab }) {
+  const cajaPos = totales.caja >= 0;
+  const alertas = [];
+  if (totales.caja < 0) alertas.push({ txt: `Tu caja está en negativo (${clp(totales.caja)}). Revisa ingresos o pagos pendientes.`, grave: true });
+  if (totales.nVencidas > 0) alertas.push({ txt: `${totales.nVencidas} factura(s) vencida(s) por cobrar: ${clp(totales.montoVencido)}. Cobra pronto.`, grave: true });
+  if (totales.reembolsosPendientes > 0) alertas.push({ txt: `Debes reembolsar ${clp(totales.reembolsosPendientes)} a los dueños (ver Reembolsos).`, grave: false });
+  if (totales.deudaPorPagar > 0) alertas.push({ txt: `Deuda de préstamos por pagar: ${clp(totales.deudaPorPagar)}.`, grave: false });
+
   return (
     <div>
-      <div style={S.metricGrid}>
-        <Metric label="Ingresos netos (total)" value={clp(totales.ing)} />
-        <Metric label="Egresos netos (total)" value={clp(totales.egr)} />
-        <Metric label="Resultado neto" value={clp(totales.resultado)} tone={totales.resultado >= 0 ? "pos" : "neg"} />
-        <Metric label="Caja neta (pagado)" value={clp(totales.caja)} tone={totales.caja >= 0 ? "pos" : "neg"} />
-        <Metric label="Por cobrar (facturas)" value={clp(totales.porCobrar)} tone="accent" />
+      {/* Saldo de caja destacado */}
+      <div style={{ background: cajaPos ? "#1D9E75" : "#E24B4A", borderRadius: 14, padding: "22px 24px", marginBottom: 20, color: "#fff" }}>
+        <div style={{ fontSize: 14, opacity: 0.9 }}>Saldo de caja hoy</div>
+        <div style={{ fontSize: 38, fontWeight: 700, marginTop: 2 }}>{clp(totales.caja)}</div>
+        <div style={{ fontSize: 12, opacity: 0.85, marginTop: 4 }}>
+          Plata real disponible (incluye préstamos, reembolsos y factoring)
+        </div>
       </div>
+
+      {/* Números de apoyo */}
+      <div style={S.metricGrid}>
+        <Metric label="Por cobrar (facturas)" value={clp(totales.porCobrar)} tone="accent" />
+        <Metric label="Deuda por pagar (préstamos)" value={clp(totales.deudaPorPagar)} tone={totales.deudaPorPagar > 0 ? "neg" : "pos"} />
+        <Metric label="Reembolsos pendientes" value={clp(totales.reembolsosPendientes)} tone={totales.reembolsosPendientes > 0 ? "neg" : "pos"} />
+        <Metric label="Resultado neto (ing − egr)" value={clp(totales.resultado)} tone={totales.resultado >= 0 ? "pos" : "neg"} />
+      </div>
+
+      {/* Alertas */}
+      {alertas.length > 0 && (
+        <div style={S.card}>
+          <h2 style={S.h2}>Alertas</h2>
+          {alertas.map((a, i) => (
+            <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "8px 0", fontSize: 14,
+              color: a.grave ? "var(--text-danger)" : "var(--text-warning)" }}>
+              <span>{a.grave ? "⚠" : "•"}</span><span>{a.txt}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div style={S.card}>
         <div style={S.cardHead}>
           <h2 style={S.h2}>Resultado por proyecto</h2>
