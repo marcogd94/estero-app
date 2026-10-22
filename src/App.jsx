@@ -209,14 +209,16 @@ function Panel({ onLogout, email }) {
     const { error } = await supabase.from("facturas").update({ estado }).eq("id", id);
     if (!error) setFacturas((p) => p.map((x) => x.id === id ? { ...x, estado } : x));
   };
-  // ---- Factorizar una factura: adelanto entra a caja, comisión es gasto ----
-  const factorizarFactura = async (factura, adelanto, fecha) => {
+  // ---- Factorizar una factura: ingresa el TOTAL (100%) a caja, la comisión es gasto ----
+  //   Recibe la COMISIÓN directamente. El adelanto real = total − comisión (solo informativo).
+  const factorizarFactura = async (factura, comision, fecha) => {
     const totalFactura = Math.round(factura.neto * (factura.exento ? 1 : 1 + IVA_RATE));
-    const comision = Math.max(0, totalFactura - adelanto);
-    // 1) Ingreso a caja por el adelanto
+    const com = Math.max(0, Math.round(comision));
+    const adelanto = totalFactura - com; // lo que realmente te adelantaron, para mostrar
+    // 1) Ingreso a caja por el TOTAL de la factura
     const movIng = {
       fecha, proyecto: factura.proyecto || null, tipo: "ING", categoria: "Facturación Proyectos",
-      detalle: `Factoring factura ${factura.folio} (${factura.cliente})`, neto: adelanto, total: adelanto,
+      detalle: `Factoring factura ${factura.folio} (${factura.cliente})`, neto: totalFactura, total: totalFactura,
       doc: "FACTURA", pagado: true,
     };
     const { data: mi, error: ei } = await supabase.from("movimientos").insert(movIng).select();
@@ -225,10 +227,10 @@ function Panel({ onLogout, email }) {
     if (mi) setMovs((p) => [...mi, ...p]);
     // 2) Egreso por la comisión (si hay)
     let movComId = null;
-    if (comision > 0) {
+    if (com > 0) {
       const movEgr = {
         fecha, proyecto: null, tipo: "EGR", categoria: "Gastos financieros",
-        detalle: `Comisión factoring factura ${factura.folio}`, neto: comision, total: comision,
+        detalle: `Comisión factoring factura ${factura.folio}`, neto: com, total: com,
         doc: "FACTURA", pagado: true,
       };
       const { data: mc, error: ec } = await supabase.from("movimientos").insert(movEgr).select();
@@ -237,7 +239,7 @@ function Panel({ onLogout, email }) {
     // 3) Actualizar la factura
     const cambios = {
       estado: "En factoring", factoring: true, factoring_adelanto: adelanto,
-      factoring_comision: comision, factoring_fecha: fecha,
+      factoring_comision: com, factoring_fecha: fecha,
       mov_adelanto_id: movIngId, mov_comision_id: movComId,
     };
     const { error: ef } = await supabase.from("facturas").update(cambios).eq("id", factura.id);
@@ -1538,11 +1540,10 @@ function Facturacion({ facturas, proyectos, onAdd, onEstado, onDelete, onFactori
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
   const total = (neto, exento) => Math.round(neto * (exento ? 1 : 1 + IVA_RATE));
 
-  const abrirFactoring = (factura) => { setFactDe(factura); setFact({ adelanto: "", fecha: today() }); };
+  const abrirFactoring = (factura) => { setFactDe(factura); setFact({ comision: "", fecha: today() }); };
   const confirmarFactoring = async () => {
-    const adelanto = parseInt(fact.adelanto, 10);
-    if (!adelanto || adelanto <= 0) return;
-    await onFactorizar(factDe, adelanto, fact.fecha);
+    const comision = parseInt(fact.comision, 10) || 0;
+    await onFactorizar(factDe, comision, fact.fecha);
     setFactDe(null);
   };
 
@@ -1694,27 +1695,37 @@ function Facturacion({ facturas, proyectos, onAdd, onEstado, onDelete, onFactori
             <h2 style={S.h2}>Factorizar factura {factDe.folio}</h2>
             <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: "0 0 14px" }}>
               Total de la factura: <b>{clp(total(factDe.neto, factDe.exento))}</b> ({factDe.cliente}).
-              Ingresa cuánto te adelantó el factoring (total menos su comisión).
+              Ingresa la comisión que te cobró el factoring.
             </p>
-            <Field label="Fecha del adelanto">
+            <Field label="Fecha del factoring">
               <input type="date" value={fact.fecha} onChange={(e) => setFact({ ...fact, fecha: e.target.value })} style={S.input} />
             </Field>
             <div style={{ marginTop: 10 }}>
-              <div style={S.fieldLabel}>Monto adelantado</div>
-              <input type="number" value={fact.adelanto} onChange={(e) => setFact({ ...fact, adelanto: e.target.value })} placeholder="0" style={S.input} />
+              <div style={S.fieldLabel}>Comisión del factoring</div>
+              <input type="number" value={fact.comision} onChange={(e) => setFact({ ...fact, comision: e.target.value })} placeholder="0" style={S.input} />
             </div>
-            {fact.adelanto && (
-              <div style={{ ...S.pagoRow, marginTop: 10 }}>
-                <span>Comisión factoring (gasto)</span>
-                <b style={{ color: "var(--text-danger)" }}>{clp(Math.max(0, total(factDe.neto, factDe.exento) - parseInt(fact.adelanto, 10)))}</b>
-              </div>
+            {fact.comision !== "" && (
+              <>
+                <div style={{ ...S.pagoRow, marginTop: 10 }}>
+                  <span>Ingresa a caja (total factura)</span>
+                  <b style={{ color: "var(--text-success)" }}>+ {clp(total(factDe.neto, factDe.exento))}</b>
+                </div>
+                <div style={S.pagoRow}>
+                  <span>Comisión (gasto financiero)</span>
+                  <b style={{ color: "var(--text-danger)" }}>− {clp(parseInt(fact.comision, 10) || 0)}</b>
+                </div>
+                <div style={{ ...S.pagoRow, borderTop: "0.5px solid var(--border)", paddingTop: 6 }}>
+                  <span style={{ fontWeight: 600 }}>Adelanto neto que recibes</span>
+                  <b>{clp(total(factDe.neto, factDe.exento) - (parseInt(fact.comision, 10) || 0))}</b>
+                </div>
+              </>
             )}
             <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
               <button onClick={confirmarFactoring} style={{ ...S.primaryBtn, flex: 1 }}>Confirmar factoring</button>
               <button onClick={() => setFactDe(null)} style={S.logoutBtn}>Cancelar</button>
             </div>
             <p style={{ fontSize: 11, color: "var(--text-muted)", margin: "10px 0 0" }}>
-              El adelanto entra a caja como ingreso; la comisión se registra como gasto financiero. La factura queda "En factoring" hasta que la marques Pagada.
+              Entra el total de la factura a caja y sale la comisión como gasto. El saldo neto es lo que realmente te adelantaron. La factura queda "En factoring" hasta que la marques Pagada.
             </p>
           </div>
         </div>
