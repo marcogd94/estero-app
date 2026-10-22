@@ -363,10 +363,36 @@ function Panel({ onLogout, email }) {
   // ---- CRUD préstamos ----
   const addPrestamo = async (pr) => {
     const { data, error } = await supabase.from("prestamos").insert(pr).select();
-    if (!error && data) setPrestamos((p) => [...data, ...p]);
-    return error;
+    if (error || !data) return error;
+    let prestamoFinal = data[0];
+    // Si "se mueve ahora", generar el movimiento de caja:
+    //   por_cobrar (yo presto) = sale de caja (EGR); por_pagar (me prestan) = entra a caja (ING)
+    if (pr.mueve_caja) {
+      const esCobrar = pr.tipo === "por_cobrar";
+      const mov = {
+        fecha: pr.fecha, proyecto: null, tipo: esCobrar ? "EGR" : "ING",
+        categoria: "Préstamos / Capital",
+        detalle: `${esCobrar ? "Préstamo entregado a" : "Préstamo recibido de"} ${pr.contraparte}`,
+        neto: pr.monto, total: pr.monto, doc: "BOLETA", pagado: true,
+      };
+      const { data: md, error: me } = await supabase.from("movimientos").insert(mov).select();
+      if (!me && md) {
+        setMovs((p) => [...md, ...p]);
+        const movId = md[0].id;
+        await supabase.from("prestamos").update({ mov_inicial_id: movId }).eq("id", prestamoFinal.id);
+        prestamoFinal = { ...prestamoFinal, mov_inicial_id: movId };
+      }
+    }
+    setPrestamos((p) => [prestamoFinal, ...p]);
+    return null;
   };
   const delPrestamo = async (id) => {
+    const pr = prestamos.find((x) => x.id === id);
+    // Borrar el movimiento de caja inicial si lo tiene
+    if (pr?.mov_inicial_id) {
+      await supabase.from("movimientos").delete().eq("id", pr.mov_inicial_id);
+      setMovs((p) => p.filter((x) => x.id !== pr.mov_inicial_id));
+    }
     const { error } = await supabase.from("prestamos").delete().eq("id", id);
     if (!error) {
       setPrestamos((p) => p.filter((x) => x.id !== id));
@@ -2433,7 +2459,7 @@ function Personal({ trabajadores, proyectos, contratos, dias, anticipos, liqItem
 // ---------- PRÉSTAMOS ----------
 function Prestamos({ prestamos, abonos, clp, onAddPrestamo, onDelPrestamo, onAddAbono, onDelAbono }) {
   const [vista, setVista] = useState("por_pagar");
-  const [nuevo, setNuevo] = useState({ contraparte: "", detalle: "", monto: "", fecha: today() });
+  const [nuevo, setNuevo] = useState({ contraparte: "", detalle: "", monto: "", fecha: today(), mueve_caja: false });
   const [err, setErr] = useState("");
   const [abonoDe, setAbonoDe] = useState(null); // id del préstamo al que se agrega abono
   const [ab, setAb] = useState({ fecha: today(), monto: "" });
@@ -2443,10 +2469,10 @@ function Prestamos({ prestamos, abonos, clp, onAddPrestamo, onDelPrestamo, onAdd
     if (!nuevo.contraparte.trim() || !parseInt(nuevo.monto, 10)) { setErr("Contraparte y monto son obligatorios."); return; }
     const error = await onAddPrestamo({
       tipo: vista, contraparte: nuevo.contraparte.trim(), detalle: nuevo.detalle.trim() || null,
-      monto: parseInt(nuevo.monto, 10), fecha: nuevo.fecha, activo: true,
+      monto: parseInt(nuevo.monto, 10), fecha: nuevo.fecha, activo: true, mueve_caja: nuevo.mueve_caja,
     });
     if (error) { setErr("No se pudo guardar."); return; }
-    setNuevo({ contraparte: "", detalle: "", monto: "", fecha: today() });
+    setNuevo({ contraparte: "", detalle: "", monto: "", fecha: today(), mueve_caja: false });
   };
 
   const crearAbono = async (prestamoId) => {
@@ -2485,7 +2511,10 @@ function Prestamos({ prestamos, abonos, clp, onAddPrestamo, onDelPrestamo, onAdd
       <div style={S.card}>
         <h2 style={S.h2}>{esPagar ? "Registrar deuda / préstamo recibido" : "Registrar préstamo entregado"}</h2>
         <p style={{ fontSize: 12, color: "var(--text-muted)", margin: "0 0 12px" }}>
-          Este monto es el saldo de partida; no entra a la caja. Los abonos que registres después sí se reflejan en la caja.
+          {nuevo.mueve_caja
+            ? (esPagar ? "La plata recibida ENTRA a la caja ahora. Los abonos que pagues después saldrán de la caja."
+                       : "La plata entregada SALE de la caja ahora. Los abonos que te devuelvan después entrarán a la caja.")
+            : "Saldo histórico: no toca la caja (ya existía de antes). Solo los abonos moverán la caja."}
         </p>
         <div style={S.formGrid}>
           <Field label={esPagar ? "Prestamista / Acreedor" : "Deudor"}>
@@ -2501,6 +2530,12 @@ function Prestamos({ prestamos, abonos, clp, onAddPrestamo, onDelPrestamo, onAdd
           </Field>
           <Field label="Fecha">
             <input type="date" value={nuevo.fecha} onChange={(e) => setNuevo({ ...nuevo, fecha: e.target.value })} style={S.input} />
+          </Field>
+          <Field label="¿Mueve la caja?">
+            <select value={nuevo.mueve_caja ? "si" : "no"} onChange={(e) => setNuevo({ ...nuevo, mueve_caja: e.target.value === "si" })} style={S.input}>
+              <option value="si">{esPagar ? "Recibo la plata ahora" : "Entrego la plata ahora"}</option>
+              <option value="no">Saldo histórico (no toca caja)</option>
+            </select>
           </Field>
           <div style={{ display: "flex", alignItems: "flex-end" }}>
             <button onClick={crear} style={S.primaryBtn}>Registrar</button>
