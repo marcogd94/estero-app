@@ -518,7 +518,7 @@ function Panel({ onLogout, email }) {
   }, [proyectos, movs]);
 
   // Efecto de los reembolsos a dueños en la caja: cada devolución sale de caja (−).
-  const efectoReembolsos = useMemo(() => reembolsos.reduce((s, r) => s - r.monto, 0), [reembolsos]);
+  // (Nota: el reembolso a dueños ya se registra como EGR en movimientos, así que NO se descuenta aparte de la caja.)
 
   // Efecto de los abonos de préstamos en la caja:
   //  - abono a "por_pagar" = pago de deuda = sale de caja (−)
@@ -539,9 +539,11 @@ function Panel({ onLogout, email }) {
   const totales = useMemo(() => {
     const ing = movs.filter((x) => x.tipo === "ING").reduce((s, x) => s + x.neto, 0);
     const egr = movs.filter((x) => x.tipo === "EGR").reduce((s, x) => s + x.neto, 0);
-    // MISMA fórmula exacta que la pestaña "Caja empresa" (cajaReal), para que el número coincida al peso.
+    // Caja = ingresos pagados que entraron, menos egresos pagados que salieron de la empresa.
+    // Un INGRESO siempre entra a caja (da igual quién lo registró); un EGRESO solo baja caja si lo pagó la empresa (tocaCaja).
+    // El reembolso a un dueño YA es un EGR "Reembolso a dueño" dentro de movs, así que no se resta aparte.
     const cajaBase = movs
-      .filter((x) => x.pagado && tocaCaja(x))
+      .filter((x) => x.pagado && (x.tipo === "ING" || tocaCaja(x)))
       .reduce((s, x) => s + (x.tipo === "ING" ? montoCaja(x) : -montoCaja(x)), 0);
     const totalFact = (f) => Math.round(f.neto * (f.exento ? 1 : 1 + IVA_RATE));
     // Por cobrar: facturas no pagadas y que no estén en factoring (esas ya te adelantaron la plata)
@@ -565,11 +567,11 @@ function Panel({ onLogout, email }) {
     const reembolsosPendientes = Math.max(0, gastosDuenos - devuelto);
     return {
       ing, egr, resultado: ing - egr,
-      caja: cajaBase + efectoAbonosCaja + efectoReembolsos, porCobrar,
+      caja: cajaBase + efectoAbonosCaja, porCobrar,
       montoVencido, nVencidas: facturasVencidas.length,
       deudaPorPagar, prestadoPorCobrar, reembolsosPendientes,
     };
-  }, [movs, facturas, prestamos, abonos, reembolsos, efectoAbonosCaja, efectoReembolsos]);
+  }, [movs, facturas, prestamos, abonos, reembolsos, efectoAbonosCaja]);
 
   const movsFiltrados = useMemo(() => {
     const l = filtroProy === "TODOS" ? movs : movs.filter((x) => x.proyecto === filtroProy);
@@ -639,7 +641,7 @@ function Panel({ onLogout, email }) {
                 filtroProy={filtroProy} setFiltroProy={setFiltroProy} efectoAbonos={efectoAbonosCaja}
                 onAdd={addMov} onTogglePagado={toggleMovPagado} onDelete={delMov} />
             )}
-            {tab === "caja" && <CajaEmpresa movs={movs} clp={clp} efectoAbonos={efectoAbonosCaja + efectoReembolsos} />}
+            {tab === "caja" && <CajaEmpresa movs={movs} clp={clp} efectoAbonos={efectoAbonosCaja} />}
             {tab === "analisis" && <Analisis movs={movs} proyectos={proyectos} facturas={facturas} trabajadores={trabajadores} contratos={contratos} clp={clp} />}
             {tab === "iva" && <IvaMensual movs={movs} facturas={facturas} clp={clp} />}
             {tab === "facturacion" && (
@@ -1501,7 +1503,8 @@ function CajaEmpresa({ movs, clp, efectoAbonos = 0 }) {
   const ingresos = enCaja.filter((m) => m.tipo === "ING").reduce((s, m) => s + montoCaja(m), 0);
   const egresos = enCaja.filter((m) => m.tipo === "EGR").reduce((s, m) => s + montoCaja(m), 0);
   const saldo = ingresos - egresos;
-  const cajaReal = movs.filter((m) => m.pagado && tocaCaja(m)).reduce((s, m) => s + (m.tipo === "ING" ? montoCaja(m) : -montoCaja(m)), 0) + efectoAbonos;
+  // Ingreso pagado: siempre entra a caja. Egreso pagado: baja caja solo si lo pagó la empresa (tocaCaja).
+  const cajaReal = movs.filter((m) => m.pagado && (m.tipo === "ING" || tocaCaja(m))).reduce((s, m) => s + (m.tipo === "ING" ? montoCaja(m) : -montoCaja(m)), 0) + efectoAbonos;
 
   const meses = {};
   enCaja.forEach((m) => {
