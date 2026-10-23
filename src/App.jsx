@@ -400,10 +400,31 @@ function Panel({ onLogout, email }) {
     }
   };
   const addAbono = async (ab) => {
-    const { data, error } = await supabase.from("abonos_prestamo").insert(ab).select();
+    // Crear primero el movimiento de caja del abono, para que aparezca como una línea real en Movimientos
+    // y el saldo acumulado calce. Signo según el tipo de préstamo:
+    //   por_pagar  (me prestaron, debo)  -> abono = pago mi deuda   = EGR (sale de caja)
+    //   por_cobrar (yo presté)           -> abono = me devuelven     = ING (entra a caja)
+    const prest = prestamos.find((p) => p.id === ab.prestamo);
+    const esPagar = prest?.tipo === "por_pagar";
+    const contraparte = prest?.contraparte || "";
+    let movId = null;
+    const mov = {
+      fecha: ab.fecha, proyecto: null, tipo: esPagar ? "EGR" : "ING",
+      categoria: "Préstamos / Capital",
+      detalle: `${esPagar ? "Abono a préstamo de" : "Abono recibido de"} ${contraparte}`,
+      neto: ab.monto, total: ab.monto, doc: "BOLETA", pagado: true,
+    };
+    const { data: md, error: me } = await supabase.from("movimientos").insert(mov).select();
+    if (!me && md) { setMovs((p) => [...md, ...p]); movId = md[0].id; }
+    const { data, error } = await supabase.from("abonos_prestamo").insert({ ...ab, movimiento_id: movId }).select();
     if (!error && data) setAbonos((p) => [...data, ...p]);
   };
   const delAbono = async (id) => {
+    const ab = abonos.find((x) => x.id === id);
+    if (ab?.movimiento_id) {
+      await supabase.from("movimientos").delete().eq("id", ab.movimiento_id);
+      setMovs((p) => p.filter((x) => x.id !== ab.movimiento_id));
+    }
     const { error } = await supabase.from("abonos_prestamo").delete().eq("id", id);
     if (!error) setAbonos((p) => p.filter((x) => x.id !== id));
   };
@@ -520,7 +541,8 @@ function Panel({ onLogout, email }) {
   // Efecto de los reembolsos a dueños en la caja: cada devolución sale de caja (−).
   // (Nota: el reembolso a dueños ya se registra como EGR en movimientos, así que NO se descuenta aparte de la caja.)
 
-  // Efecto de los abonos de préstamos en la caja:
+  // Efecto en caja SOLO de abonos ANTIGUOS (sin movimiento asociado). Los abonos nuevos ya crean
+  // su propio movimiento en la lista, así que no se cuentan aquí (si no, contarían doble).
   //  - abono a "por_pagar" = pago de deuda = sale de caja (−)
   //  - abono a "por_cobrar" = te devuelven = entra a caja (+)
   const efectoAbonosCaja = useMemo(() => {
@@ -529,6 +551,7 @@ function Panel({ onLogout, email }) {
       return p ? p.tipo : null;
     };
     return abonos.reduce((s, a) => {
+      if (a.movimiento_id) return s; // ya está como movimiento en la lista
       const t = tipoDe(a.prestamo);
       if (t === "por_pagar") return s - a.monto;
       if (t === "por_cobrar") return s + a.monto;
